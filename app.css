@@ -396,3 +396,21 @@ a.btn:hover{text-decoration:none}
 @container pn (max-width:640px){.prow{grid-template-columns:40px minmax(0,1fr) auto;grid-template-areas:"t n n" "t p l"}.prow .lt{grid-area:l;text-align:right}}
 .panel .tag,.panel .back{background:#e3e3e3}
 .panel .tagb:hover,.panel .back:hover{background:#d4d4d4}
+/* earnings · bonuses */
+.bon .row{justify-content:space-between;flex-wrap:wrap;gap:4px 10px;padding:6px 0}
+.bon .row b{font-weight:550}
+.bon .meter{margin:2px 0 6px}
+.bonacct+.bonacct{border-top:1px solid #ebebeb;margin-top:12px;padding-top:12px}
+.bonacct h3{font-size:13px;font-weight:650;margin-bottom:4px}
+.cpx{padding:8px 16px 12px}
+.aside-s .bon .row{display:block;padding:5px 0}
+.aside-s .bon .row b{display:block;margin-bottom:2px}
+.bon .bv{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;text-align:right}
+.tbl .nw{white-space:nowrap}
+.tbl.st td .sm-only{display:none}
+@container pn (max-width: 620px){
+  .tbl.st .hn{display:none}
+  .tbl.st td .sm-only{display:block}
+  .tbl.st td.tc{display:table-cell}
+  .bon .bv{justify-content:flex-start;text-align:left}
+}

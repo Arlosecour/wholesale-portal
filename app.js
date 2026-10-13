@@ -1,3 +1,110 @@
+/* ===== Commission ledger — shared by the server (Apps Script) and the portal preview =====
+   Rules (Sales Rep Agreement §4, Compensation Framework; the Agreement governs where they differ):
+   • Commission on invoices paid in full, base = product subtotal after discounts, less refunds, before shipping & tax.
+     Opening order 15%. Reorders 10% (year one, and after year one while the account is in good standing; house accounts earn nothing).
+     Each line goes on the statement paid on the 1st of the month after the invoice was paid.
+   • Year-one bonuses (first 12 months after the opening order, invoice paid in full, account not a house account):
+     Fast Reorder $150 — 2nd order placed AND paid within 45 days of the opening order.
+     Loyal Account $250 — 4 orders (opening counts) placed & paid in year one, OR $3,500 of paid reorders (opening excluded), whichever first.
+     Account Quality — paid reorders in year one: $5,000 → $200, $8,000 → $400, $12,000 → $750 (replace-up: paid as top-ups).
+   • After year one: good standing = 2 paid reorders in the prior 12 months + a touchpoint every quarter (shown, not enforced:
+     converting to a house account follows the review process in §6.1 and is set by Arlo Secour on the Rep Accounts tab).
+   • Welcome bonus $1,000 on signing.
+   Paid status: commission is paid when its invoice was paid on/before the rep's "Paid through" date (or listed on Payouts).
+   Bonuses are paid only when listed on the Payouts tab; an unpaid bonus from a past month carries to the next statement. */
+function rpLedger_(inp){
+  var r2 = function(n){ return Math.round((+n || 0) * 100) / 100; };
+  var P = function(s){ s = String(s).slice(0, 10).split('-'); return new Date(+s[0], +s[1] - 1, +s[2]); };
+  var I = function(d){ return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); };
+  var addD = function(s, n){ var d = P(s); d.setDate(d.getDate() + n); return I(d); };
+  var addM = function(s, n){ var d = P(s); d.setMonth(d.getMonth() + n); return I(d); };
+  var stmtOf = function(ymd){ return addM(ymd.slice(0, 7) + '-01', 1); };   /* invoice paid in Oct → Nov 1 statement */
+  var today = inp.today, rep = inp.rep || {}, pt = rep.paidThrough || '';
+  var paidKeys = {}; (inp.payouts || []).forEach(function(p){ paidKeys[p.key] = p; });
+  /* next statement that hasn't been paid: the one after "paid through" (Sep 30 → Nov 1, covering October) */
+  var nextStmt = pt ? addM(addD(pt, 1).slice(0, 7) + '-01', 1) : stmtOf(today);
+  var lines = [], progress = {};
+  var base = function(o){ var b = r2(Math.min(+o.subtotal || 0, (o.origSubtotal != null ? +o.origSubtotal : +o.subtotal || 0) - (+o.refunded || 0))); return b > 0 ? b : 0; };
+  var push = function(l){
+    l.amount = r2(l.amount);
+    var po = paidKeys[l.key];
+    l.paid = !!po || (l.type === 'commission' && !!pt && l.date <= pt);
+    l.paidOn = po ? po.paidOn : (l.paid ? stmtOf(l.date) : '');
+    l.statement = stmtOf(l.date);
+    if (!l.paid && l.statement < nextStmt){ l.carried = l.statement; l.statement = nextStmt; }
+    lines.push(l);
+  };
+  if (rep.signed) push({type: 'bonus', key: 'WELCOME', label: 'Welcome bonus', date: rep.signed, amount: 1000});
+
+  (inp.accts || []).forEach(function(x){
+    var a = x.acct, from = x.from || '', to = x.to || '', house = String(x.standing || a.standing || '').toLowerCase() === 'house';
+    var all = (a.orders || []).filter(function(o){ return !o.cancelled; }).slice().sort(function(p, q){ return p.placed < q.placed ? -1 : p.placed > q.placed ? 1 : 0; });
+    if (!all.length){ progress[a.id] = {orders: 0}; return; }
+    var open = all[0], yEnd = addM(open.placed, 12), yEndLast = addD(yEnd, -1);
+    var mine = function(o){ return (!from || o.placed >= from) && (!to || o.placed <= to); };
+    all.forEach(function(o){
+      if (!o.paid || !mine(o)) return;
+      var b = base(o); if (!b) return;
+      var isOpen = o.id === open.id, yr1 = o.placed < yEnd;
+      if (!isOpen && !yr1 && house) return;
+      var rate = isOpen ? 0.15 : 0.10;
+      push({type: 'commission', key: 'C|' + o.id, acct: a.id, company: a.name, orderId: o.id, order: o.name, date: o.paid, placed: o.placed, base: b, rate: rate, amount: b * rate,
+        label: (isOpen ? 'Opening order' : yr1 ? 'Reorder' : 'Reorder (year 2+)')});
+    });
+    /* year-one bonuses */
+    var py = all.filter(function(o){ return o.paid && o.placed < yEnd && o.paid < yEnd && mine(o) && base(o) > 0; });
+    var byPaid = py.slice().sort(function(p, q){ return p.paid < q.paid ? -1 : p.paid > q.paid ? 1 : 0; });
+    var fastBy = addD(open.placed, 45), second = all[1];
+    var fast = {deadline: fastBy, status: 'open'};
+    if (second && second.placed <= fastBy && second.paid && second.paid <= fastBy && mine(second)) { fast.status = 'earned'; fast.date = second.paid; fast.order = second.name; }
+    else if ((second && second.placed > fastBy) || today > fastBy || (second && second.paid && second.paid > fastBy)) fast.status = 'missed';
+    else if (second){ fast.status = 'waiting'; fast.order = second.name; }
+    /* loyal: 4th paid order, or $3,500 of paid reorders */
+    var loyal = {status: today >= yEnd ? 'missed' : 'open', need: 4, reNeed: 3500}, cum = 0, cnt = 0, qual = {reorders: 0, tiers: []};
+    var TIERS = [[5000, 200, 'Tier 1 — Established'], [8000, 400, 'Tier 2 — Strong'], [12000, 750, 'Tier 3 — Elite']], tierPaid = 0;
+    byPaid.forEach(function(o){
+      cnt++;
+      if (o.id !== open.id) cum = r2(cum + base(o));
+      if (loyal.status !== 'earned' && (cnt >= 4 || cum >= 3500)){ loyal.status = 'earned'; loyal.date = o.paid; loyal.order = o.name; loyal.via = cnt >= 4 ? 'orders' : 'reorders'; }
+      TIERS.forEach(function(t, i){ if (cum >= t[0] && qual.tiers.indexOf(i) < 0){ qual.tiers.push(i); push({type: 'bonus', key: 'QUALITY' + (i + 1) + '|' + a.id, acct: a.id, company: a.name, label: 'Account Quality ' + t[2] + (tierPaid ? ' (top-up from ' + ('$' + tierPaid) + ')' : ''), date: o.paid, amount: t[1] - tierPaid, order: o.name}); tierPaid = t[1]; } });
+    });
+    loyal.orders = cnt; loyal.reorders = cum; qual.reorders = cum;
+    var nextT = TIERS.filter(function(t){ return cum < t[0]; })[0];
+    qual.next = nextT ? {at: nextT[0], bonus: nextT[1], name: nextT[2], left: r2(nextT[0] - cum)} : null;
+    qual.tier = qual.tiers.length ? TIERS[qual.tiers[qual.tiers.length - 1]][2] : '';
+    if (!house){
+      if (fast.status === 'earned') push({type: 'bonus', key: 'FAST|' + a.id, acct: a.id, company: a.name, label: 'Fast Reorder bonus', date: fast.date, amount: 150, order: fast.order});
+      if (loyal.status === 'earned') push({type: 'bonus', key: 'LOYAL|' + a.id, acct: a.id, company: a.name, label: 'Loyal Account bonus', date: loyal.date, amount: 250, order: loyal.order});
+    } else lines = lines.filter(function(l){ return !(l.type === 'bonus' && l.acct === a.id && !l.paid); });
+    /* good standing after year one: 2 paid reorders in the prior 12 months + quarterly touchpoints */
+    var since = addM(today, -12), re12 = all.filter(function(o){ return o.id !== open.id && o.paid && o.paid > since && o.paid <= today; }).length;
+    progress[a.id] = {opening: open.name, openingDate: open.placed, yearEnd: yEndLast, inYearOne: today < yEnd, fast: fast, loyal: loyal, quality: qual,
+      reorders12: re12, standingOk: re12 >= 2, house: house};
+  });
+
+  /* statements */
+  var by = {};
+  lines.forEach(function(l){ (by[l.statement] = by[l.statement] || []).push(l); });
+  var statements = Object.keys(by).sort().reverse().map(function(d){
+    var ls = by[d].sort(function(p, q){ return p.type !== q.type ? (p.type === 'commission' ? -1 : 1) : p.date < q.date ? -1 : 1; });
+    var tot = r2(ls.reduce(function(s, l){ return s + l.amount; }, 0)), allPaid = ls.every(function(l){ return l.paid; });
+    return {date: d, covers: addM(d, -1).slice(0, 7), lines: ls, total: tot, commission: r2(ls.filter(function(l){ return l.type === 'commission'; }).reduce(function(s, l){ return s + l.amount; }, 0)),
+      bonuses: r2(ls.filter(function(l){ return l.type === 'bonus'; }).reduce(function(s, l){ return s + l.amount; }, 0)),
+      status: allPaid ? 'paid' : d > today ? (addM(d, -1) <= today ? 'building' : 'upcoming') : 'due'};
+  });
+  var unpaidLines = lines.filter(function(l){ return !l.paid; });
+  var waiting = [];
+  (inp.accts || []).forEach(function(x){
+    var a = x.acct, all = (a.orders || []).filter(function(o){ return !o.cancelled; }).sort(function(p, q){ return p.placed < q.placed ? -1 : 1; });
+    all.forEach(function(o, i){ if (!o.paid && (!x.from || o.placed >= x.from) && (!x.to || o.placed <= x.to)){ var b = base(o); waiting.push({acct: a.id, company: a.name, orderId: o.id, order: o.name, placed: o.placed, base: b, rate: i === 0 ? 0.15 : 0.10, amount: r2(b * (i === 0 ? 0.15 : 0.10))}); } });
+  });
+  var yr = today.slice(0, 4);
+  return {today: today, paidThrough: pt, nextStatement: nextStmt, lines: lines, statements: statements, progress: progress, waiting: waiting,
+    owed: r2(unpaidLines.reduce(function(s, l){ return s + l.amount; }, 0)),
+    paidYtd: r2(lines.filter(function(l){ return l.paid && (l.paidOn || '').slice(0, 4) === yr; }).reduce(function(s, l){ return s + l.amount; }, 0)),
+    earnedAll: r2(lines.reduce(function(s, l){ return s + l.amount; }, 0))};
+}
+
 /* ===== Arlo Secour · Wholesale portal — runs inside the Shopify admin (embedded app) =====
    Read-only towards Shopify. Orders, companies and customers are entered in Shopify itself.
    Who is signed in comes from Shopify: App Bridge gives a session token, the server (Apps Script) checks it
@@ -58,7 +165,7 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + IC[n] + "</svg>";
 
 /* ---------- state ---------- */
-const S = {data: null, err: "", view: "home", hist: [], acct: null, locId: null, custId: null, okey: null, oFilter: "all", tForm: null, tErr: {}, sMode: "placed", sYear: null, busy: false};
+const S = {data: null, err: "", view: "home", hist: [], acct: null, locId: null, custId: null, okey: null, oFilter: "all", tForm: null, tErr: {}, sMode: "placed", sYear: null, busy: false, lRep: null, mpConfirm: null};
 const NAV = [["home", "Home"], ["companies", "Companies"], ["customers", "Customers"], ["orders", "Orders"], ["touch", "Touchpoints"], ["sales", "Sales"], ["earnings", "Earnings"]];
 
 /* ---------- server ---------- */
@@ -77,7 +184,12 @@ async function api(action, body){
 }
 async function mock(action, b){
   await wait(action === "load" ? 120 : 350);
-  if (action === "load") return Object.assign({ok: true}, JSON.parse(JSON.stringify(window.__RP_SNAP)));
+  if (action === "load"){
+    const d = Object.assign({ok: true}, JSON.parse(JSON.stringify(window.__RP_SNAP)));
+    if (!d.ledger && !d.ledgers && typeof rpLedger_ === "function") d.ledger = rpLedger_({today: d.today, rep: {paidThrough: d.paidThrough, signed: d.signed}, payouts: d.payouts || [], accts: d.accounts.map(a => ({acct: a, from: a.assigned, standing: a.standing}))});
+    return d;
+  }
+  if (action === "markPaid") return {ok: true, paidThrough: ""};
   if (action === "touch") return {ok: true, touch: Object.assign({}, b.touch, {id: uid("T"), at: new Date().toISOString(), by: S.data.me.name})};
   if (action === "noticesRead" || action === "prefs") return {ok: true};
   return {ok: false, error: "Unknown action"};
@@ -138,6 +250,11 @@ const checkoutLines = L => (L.anyAddress ? "Ship to any address" : "Ship to loca
 /* commission estimate (stage 2 replaces this with the full ledger): 15% opening order, 10% reorders, on the net amount */
 const isOpening = (o, a) => { const st = stats(a); return st.open && st.open.id === o.id; };
 const estRate = (o, a) => isOpening(o, a) ? 0.15 : 0.10;
+/* the commission ledger (built by the server with the same rules as src/ledger.js) */
+function ledger(){ const d = S.data; if (d.ledger) return d.ledger; if (d.ledgers && d.reps && d.reps.length){ const id = S.lRep && d.ledgers[S.lRep] ? S.lRep : d.reps[0].staffId; return d.ledgers[id] || null; } return null; }
+const lineOf = id => { const L = ledger(); return L ? L.lines.find(l => l.key === "C|" + id) : null; };
+const nextSt = L => L ? L.statements.find(x => x.date === L.nextStatement) : null;
+const stBadge = st => st.status === "paid" ? bd("Paid", "ok") : st.status === "building" ? bd("In progress", "info") : st.status === "due" ? bd("Due", "warn") : bd("Upcoming", "nodot");
 
 /* ---------- badges + layout helpers ---------- */
 const bd = (t, c) => '<span class="bd ' + (c || "") + '">' + t + "</span>";
@@ -204,7 +321,7 @@ function vHome(){
       met(MONL[+mo.slice(5) - 1] + " sales", money2(mth.reduce((s, x) => s + x.total, 0)), plural(mth.length, "order")) +
       met(y + " sales", money2(ytd.reduce((s, x) => s + x.total, 0)), plural(ytd.length, "order")) +
       met("Companies", S.data.accounts.length, S.data.accounts.filter(a => a.standing === "good").length + " in good standing") +
-      met("Next statement", money2(pendEst), pt ? "estimate · paid through " + fdt(pt) : "estimate") +
+      (ledger() ? (() => { const L = ledger(), ns = nextSt(L); return met("Next statement", money2(ns ? ns.total : 0), "on " + fdt(L.nextStatement) + (ns && ns.bonuses ? " · includes " + money2(ns.bonuses) + " bonus" : "")); })() : met("Next statement", money2(pendEst), pt ? "estimate · paid through " + fdt(pt) : "estimate")) +
     "</div></div>" +
     sec("Things to do", "", '<div class="card">' + (todo.length ? todo.map(t => '<div class="todo"><span class="ico ' + t.c + '">' + ic(t.ic) + '</span><div class="m"><b>' + t.t + '</b><span class="mut">' + t.s + "</span></div>" + t.b + "</div>").join("") : '<div class="empty"><b>You’re all caught up</b>Nothing needs your attention right now.</div>') + "</div>") +
     (recentN.length ? sec("Latest notifications", '<button class="btn plain" data-go="notices">View all</button>', '<div class="card">' + recentN.map(noticeRow).join("") + "</div>") : "") +
@@ -246,12 +363,13 @@ function vOrder(){
         '<div class="pr2 tot"><span>Total</span><span class="mid"></span><span class="r">' + money2(total) + " USD</span></div>" +
         '<div class="pr2 div"><span>Paid</span><span class="mid mut">' + (o.paid ? fd(o.paid) : "not yet") + '</span><span class="r">' + money2(o.paid ? total : 0) + "</span></div>" +
       "</div></div>" +
-      '<div class="card sec"><div class="ct-h"><h3>Your commission</h3>' + bd("Estimate", "info nodot") + '</div><div class="pay">' +
-        '<div class="pr2"><span>Counts toward</span><span class="mid mut">' + (isOpening(o, a) ? "opening order rate" : "reorder rate") + '</span><span class="r">' + Math.round(rate * 100) + "%</span></div>" +
-        '<div class="pr2"><span>Commission base</span><span class="mid mut">after discounts, before shipping &amp; tax</span><span class="r">' + money2(base) + "</span></div>" +
-        '<div class="pr2 tot"><span>Estimated commission</span><span class="mid"></span><span class="r">' + money2(base * rate) + "</span></div>" +
-        '<p class="mut sm" style="margin-top:8px">' + (o.paid ? (S.data.paidThrough && o.paid <= S.data.paidThrough ? "Already included in a paid statement." : "Goes on the " + fd(addMonths(o.paid.slice(0, 7) + "-01", 1)) + " statement.") : "Earned once the invoice is paid in full.") + "</p>" +
-      "</div></div>" +
+      (() => { const ln = lineOf(o.id), r = ln ? ln.rate : rate, b0 = ln ? ln.base : base;
+        return '<div class="card sec"><div class="ct-h"><h3>Commission</h3>' + (ln ? (ln.paid ? bd("Paid", "ok") : bd("Earned", "info")) : o.cancelled ? bd("None", "nodot") : bd("Estimate", "info nodot")) + '</div><div class="pay">' +
+        '<div class="pr2"><span>Rate</span><span class="mid mut">' + (isOpening(o, a) ? "opening order" : "reorder") + '</span><span class="r">' + Math.round(r * 100) + "%</span></div>" +
+        '<div class="pr2"><span>Commission base</span><span class="mid mut">after discounts and refunds, before shipping &amp; tax</span><span class="r">' + money2(b0) + "</span></div>" +
+        '<div class="pr2 tot"><span>' + (ln ? "Commission" : "Estimated commission") + '</span><span class="mid"></span><span class="r">' + money2(ln ? ln.amount : b0 * r) + "</span></div>" +
+        '<p class="mut sm" style="margin-top:8px">' + (o.cancelled ? "Cancelled orders don’t earn commission." : ln ? (ln.paid ? "Paid on the " + fd(ln.statement) + " statement." : "Goes on the " + fd(ln.statement) + " statement.") : o.paid ? "Not commissionable." : "Earned once the invoice is paid in full.") + "</p>" +
+        '</div></div>'; })() +
     '</div><div class="side-c">' +
       aside("Company", '<p><button class="link" data-acct="' + esc(a.id) + '">' + esc(a.name) + "</button></p>" + (L ? '<p class="mut">' + esc(locName(a, L.id)) + "</p>" : "")) +
       aside("Customer", ch ? '<p><button class="link" data-cust="' + esc(ch.c.id) + '">' + esc(cName(ch.c)) + "</button></p>" + (ch.c.email ? '<p class="mut">' + esc(ch.c.email) + "</p>" : "") : '<p class="mut">—</p>') +
@@ -294,6 +412,7 @@ function vCompany(){
       aside("Notes", '<p class="' + (a.note ? "" : "mut") + '">' + (a.note ? esc(a.note).replace(/\n/g, "<br>") : "No notes") + "</p>") +
       aside("Quarterly touchpoints", '<div class="qtrs">' + qs.map(q => '<div class="qtr ' + q.st + '"><b>Q' + q.q + " " + String(q.y).slice(2) + "</b>" + (q.st === "ok" ? q.n + " logged" : q.st === "due" ? "due " + fdt(q.end) : q.st === "pre" ? "pre-portal" : "missed") + "</div>").join("") + "</div>" +
         (tps.length ? tps.slice(0, 3).map(t => '<p style="margin-top:10px"><b style="font-weight:550">' + esc(t.kind) + " · " + fdt(t.date) + '</b><br><span class="mut">' + esc(t.summary) + "</span></p>").join("") : '<p class="mut" style="margin-top:8px">No touchpoints logged in the portal yet.</p>'), '<button class="btn plain" data-tp="' + esc(a.id) + '">Log</button>') +
+      bonusAside(a) +
       aside("Standing", standingBadge(a) + '<p class="mut sm" style="margin-top:6px">' + (st.yearEnd ? "First year ends " + fd(st.yearEnd) + ". " : "") + "One touchpoint a quarter and two paid reorders a year keep it in good standing.</p>") +
     "</div></div></div>";
 }
@@ -403,23 +522,57 @@ function vSales(){
     '</div><div class="side-c">' + aside("Sales by product type", lk.length ? lk.map(k => '<div style="margin-bottom:8px"><div class="row" style="justify-content:space-between"><span>' + esc(k) + '</span><b class="num">' + money(lineT[k]) + '</b></div><div class="meter"><i style="width:' + Math.round(lineT[k] / lmax * 100) + '%"></i></div></div>').join("") : '<p class="mut">No sales in ' + y + " yet.</p>") + "</div></div></div>";
 }
 
-/* ---------- earnings (estimate until the commission ledger, stage 2) ---------- */
+/* ---------- earnings: statements, bonuses, what's waiting ---------- */
+const meter = (v, max) => '<div class="meter"><i style="width:' + Math.min(100, Math.round((v / Math.max(1, max)) * 100)) + '%"></i></div>';
+function bonusRows(a, p){
+  if (!p || !p.opening) return '<p class="mut">Bonuses start with the opening order.</p>';
+  if (p.house) return '<p class="mut">House account — no bonuses.</p>';
+  const f = p.fast, l = p.loyal, q = p.quality;
+  const fastS = f.status === "earned" ? bd("Earned", "ok") + ' <span class="mut sm">' + esc(f.order) + " · " + fdt(f.date) + "</span>" : f.status === "waiting" ? bd("Waiting on payment", "att") + ' <span class="mut sm">' + esc(f.order) + " must be paid by " + fdt(f.deadline) + "</span>" : f.status === "open" ? bd("Open", "info") + ' <span class="mut sm">2nd order placed &amp; paid by ' + fdt(f.deadline) + "</span>" : bd("Missed", "nodot");
+  const loyS = l.status === "earned" ? bd("Earned", "ok") + ' <span class="mut sm">' + (l.via === "orders" ? "4th paid order" : "$3,500 in reorders") + " · " + esc(l.order) + " · " + fdt(l.date) + "</span>" : l.status === "missed" ? bd("Missed", "nodot") : '<span class="mut sm">' + Math.min(l.orders, 4) + " of 4 paid orders · " + money(l.reorders) + " of $3,500 in reorders</span>";
+  return '<div class="bon"><div class="row"><b>Fast Reorder · $150</b><span class="bv">' + fastS + "</span></div>" +
+    '<div class="row"><b>Loyal Account · $250</b><span class="bv">' + loyS + "</span></div>" + (l.status === "open" ? meter(Math.max(l.orders / 4, l.reorders / 3500), 1) : "") +
+    '<div class="row"><b>Account Quality · $200–$750</b><span class="bv mut sm">' + (q.tier ? esc(q.tier) + " reached · " : "") + money(q.reorders) + " in reorders" + (q.next ? " · " + money(q.next.left) + " to " + esc(q.next.name.split(" — ")[0]) + " (" + money(q.next.bonus) + ")" : "") + "</span></div>" +
+    (q.next ? meter(q.reorders, q.next.at) : "") +
+    '<p class="mut sm" style="margin-top:6px">' + (p.inYearOne ? "Year one ends " + fd(p.yearEnd) + ". Bonuses count paid orders placed in the first 12 months." : "Year one ended " + fd(p.yearEnd) + ". " + plural(p.reorders12, "paid reorder") + " in the last 12 months (2 keep the 10% rate).") + "</p></div>";
+}
+function bonusAside(a){ const L = ledger(); return L && L.progress[a.id] ? aside("Year-one bonuses", bonusRows(a, L.progress[a.id])) : ""; }
 function vEarnings(){
-  const pt = S.data.paidThrough, shop = allOrders().filter(x => x.o.paid && !x.o.cancelled);
-  const after = shop.filter(x => !pt || x.o.paid > pt), byM = {};
-  after.forEach(x => { const m = x.o.paid.slice(0, 7); (byM[m] = byM[m] || []).push(x); });
-  const unpaid = allOrders().filter(x => !x.o.paid && !x.o.cancelled);
-  const months = Object.keys(byM).sort().reverse();
-  return '<div class="pg">' + ph("Earnings", bd("Estimates", "info nodot"), "", "Commission is paid on the 1st for invoices paid in full the month before. Full statements and bonus tracking are coming next.") +
-    '<div class="card sec"><div class="mets mets3">' + met("Paid through", pt ? fd(pt) : "—", "last statement") + met("Next statement", months.length ? money2(byM[months[months.length - 1]].reduce((s, x) => s + x.total * estRate(x.o, x.acct), 0)) : "$0.00", months.length ? "on " + fd(addMonths(months[months.length - 1] + "-01", 1)) : "nothing paid yet") + met("Waiting on payment", money2(unpaid.reduce((s, x) => s + x.total * estRate(x.o, x.acct), 0)), plural(unpaid.length, "open invoice")) + "</div></div>" +
-    (months.length ? months.map(m => { const xs = byM[m], tot = xs.reduce((s, x) => s + x.total * estRate(x.o, x.acct), 0); return sec(MONL[+m.slice(5) - 1] + " " + m.slice(0, 4) + " invoices", '<span class="mut">on the ' + fd(addMonths(m + "-01", 1)) + " statement</span>",
-      '<div class="card"><div class="twrap"><table class="tbl"><thead><tr><th>Order</th><th>Company</th><th>Paid</th><th class="r">Base</th><th class="r">Rate</th><th class="r">Commission</th></tr></thead><tbody>' + xs.map(x => '<tr data-order="' + esc(x.o.id) + '"><td class="b">' + esc(x.o.name) + "</td><td>" + esc(x.acct.name) + '</td><td class="mut">' + fdt(x.o.paid) + '</td><td class="r num">' + money2(x.total) + '</td><td class="r num">' + Math.round(estRate(x.o, x.acct) * 100) + '%</td><td class="r num">' + money2(x.total * estRate(x.o, x.acct)) + "</td></tr>").join("") + '<tr><td colspan="5" class="b">Total</td><td class="r num b">' + money2(tot) + "</td></tr></tbody></table></div></div>"); }).join("") : '<div class="card empty"><b>Nothing new since your last statement</b>Paid invoices appear here as soon as they’re paid in full.</div>') +
+  const L = ledger(), d = S.data, admin = d.me.role === "admin";
+  const repPick = admin && d.reps && d.reps.length > 1 ? '<div class="segm">' + d.reps.map(r => '<button data-lrep="' + esc(r.staffId) + '" class="' + ((S.lRep || d.reps[0].staffId) === r.staffId ? "on" : "") + '">' + esc(r.name) + "</button>").join("") + "</div>" : "";
+  const who = admin && d.reps && d.reps.length ? (d.reps.find(r => r.staffId === (S.lRep || d.reps[0].staffId)) || d.reps[0]) : null;
+  if (!L) return '<div class="pg">' + ph("Earnings", "", repPick, "") + '<div class="card empty"><b>No earnings yet</b>' + (admin ? "Add a rep on the Reps tab to see their statements." : "Commission shows up here once an invoice is paid in full.") + "</div></div>";
+  const ns = nextSt(L), wt = L.waiting.reduce((s, x) => s + x.amount, 0), bonusTot = L.lines.filter(l => l.type === "bonus").reduce((s, l) => s + l.amount, 0);
+  const accts = admin ? d.accounts.filter(a => L.progress[a.id]) : d.accounts;
+  const stRow = l => '<tr' + (l.orderId ? ' data-order="' + esc(l.orderId) + '"' : "") + '><td><span class="b">' + esc(l.type === "bonus" ? l.label : (l.order + " · " + l.label)) + "</span>" + (l.carried ? '<span class="two">carried from the ' + fdt(l.carried) + " statement</span>" : "") + '<span class="two sm-only">' + esc([l.company, l.rate ? Math.round(l.rate * 100) + "% of " + money2(l.base) : ""].filter(Boolean).join(" · ")) + '</span></td><td class="hn">' + esc(l.company || "—") + '</td><td class="mut nw">' + fdt(l.date) + '</td><td class="r num hn">' + (l.base != null ? money2(l.base) : "") + '</td><td class="r num hn">' + (l.rate ? Math.round(l.rate * 100) + "%" : "") + '</td><td class="r num">' + money2(l.amount) + "</td></tr>";
+  const payBtn = st => !admin || st.status === "paid" ? "" : S.mpConfirm === st.date ? '<span class="row" style="gap:6px"><button class="btn" data-mpno="1">Cancel</button><button class="btn pri" data-mpyes="' + st.date + '"' + (S.busy ? " disabled" : "") + ">" + (S.busy ? "Saving…" : "Confirm: paid " + money2(st.total)) + "</button></span>" : st.status !== "due" ? "" : '<button class="btn out" data-mp="' + st.date + '">Mark paid</button>';
+  return '<div class="pg">' + ph("Earnings" + (who ? " · " + esc(who.name) : ""), "", repPick, "Paid on the 1st for invoices paid in full the month before. 15% on opening orders, 10% on reorders, on the order total after discounts and refunds — shipping and tax excluded.") +
+    '<div class="card sec"><div class="mets">' +
+      met("Next statement", money2(ns ? ns.total : 0), "on " + fdt(L.nextStatement) + (ns && ns.status === "building" ? " · still adding" : "")) +
+      met("Paid in " + TODAY.slice(0, 4), money2(L.paidYtd), L.paidThrough ? "paid through " + fdt(L.paidThrough) : "") +
+      met("Waiting on payment", money2(wt), plural(L.waiting.length, "open invoice")) +
+      met("Bonuses earned", money2(bonusTot), "welcome + year-one") +
+    "</div></div>" +
+    (accts.length ? sec("Year-one bonuses", "", '<div class="card cp">' + accts.map(a => '<div class="bonacct"><h3>' + esc(a.name) + "</h3>" + bonusRows(a, L.progress[a.id]) + "</div>").join("") + "</div>") : "") +
+    L.statements.map(st => sec(fd(st.date) + " statement", '<span class="row" style="gap:8px">' + stBadge(st) + payBtn(st) + "</span>",
+      '<div class="card"><div class="twrap"><table class="tbl st"><thead><tr><th>Item</th><th class="hn">Company</th><th>Date</th><th class="r hn">Base</th><th class="r hn">Rate</th><th class="r">Amount</th></tr></thead><tbody>' +
+      st.lines.map(stRow).join("") + '<tr><td class="b">Total' + (st.bonuses && st.commission ? '<span class="two" style="font-weight:400">' + money2(st.commission) + " commission + " + money2(st.bonuses) + " bonuses</span>" : "") + '</td><td class="hn"></td><td></td><td class="hn"></td><td class="hn"></td><td class="r num b">' + money2(st.total) + "</td></tr></tbody></table></div>" +
+      '<p class="mut sm cpx">' + (st.status === "building" ? "Invoices paid in " + MONL[+st.covers.slice(5) - 1] + " are still being added." : "Invoices paid in " + MONL[+st.covers.slice(5) - 1] + " " + st.covers.slice(0, 4) + ".") + "</p></div>")).join("") +
+    (L.waiting.length ? sec("Waiting on payment", '<span class="mut">commission once paid in full</span>', '<div class="card"><div class="twrap"><table class="tbl"><thead><tr><th>Order</th><th>Company</th><th>Placed</th><th class="r">Base</th><th class="r">Est.</th></tr></thead><tbody>' + L.waiting.map(x => '<tr data-order="' + esc(x.orderId) + '"><td class="b">' + esc(x.order) + "</td><td>" + esc(x.company) + '</td><td class="mut">' + fdt(x.placed) + '</td><td class="r num">' + money2(x.base) + '</td><td class="r num">' + money2(x.amount) + "</td></tr>").join("") + "</tbody></table></div></div>") : "") +
     "</div>";
+}
+async function markPaid(date){
+  const L = ledger(), d = S.data, id = S.lRep || (d.reps && d.reps[0] && d.reps[0].staffId);
+  S.busy = true; render();
+  try{ await api("markPaid", {staffId: id, statement: date, paidOn: TODAY}); S.mpConfirm = null; S.busy = false; toast("Statement marked paid"); await load(); go("earnings", {isBack: true}); return; }
+  catch(e){ toast("Couldn’t save: " + e.message); }
+  S.busy = false; render();
 }
 
 /* ---------- notifications ---------- */
 function noticeRow(n){
   const a = acctOf(n.acct), est = n.kind === "paid" ? " · est. commission " + money2(n.amount * (n.rate || 0.1)) : "";
+  if (n.kind === "bonus") return '<div class="todo' + (n.read ? "" : " unread") + '" data-go="earnings"><span class="ico ok">' + ic("dollar") + '</span><div class="m"><b>You earned the ' + esc(n.order) + (a ? " for " + esc(a.name) : "") + '</b><span class="mut">' + money2(n.amount) + " · " + ftime(n.at) + "</span></div>" + (n.read ? "" : '<span class="udot" aria-label="Unread"></span>') + "</div>";
   const t = n.kind === "new" ? "New order " + esc(n.order) + " from " + esc(a ? a.name : "") : n.kind === "paid" ? esc(n.order) + " is paid in full" : n.kind === "refund" ? esc(n.order) + " was refunded" : n.kind === "cancel" ? esc(n.order) + " was cancelled" : esc(n.text || "");
   return '<div class="todo' + (n.read ? "" : " unread") + '" data-order="' + esc(n.orderId || "") + '"><span class="ico ' + (n.kind === "paid" ? "ok" : n.kind === "new" ? "info" : "att") + '">' + ic(n.kind === "paid" ? "dollar" : n.kind === "new" ? "receipt" : "alert") + '</span><div class="m"><b>' + t + '</b><span class="mut">' + money2(n.amount) + est + " · " + ftime(n.at) + "</span></div>" + (n.read ? "" : '<span class="udot" aria-label="Unread"></span>') + "</div>";
 }
@@ -440,7 +593,7 @@ function toast(t){ $("rpToast").innerHTML = '<div class="toast">' + esc(t) + "</
 const root = $("rp");
 root.addEventListener("click", async e => {
   if (e.target.closest("a")) return;
-  const t = e.target.closest("button,[data-acct],[data-order],[data-cust],[data-loc]"); if (!t) return;
+  const t = e.target.closest("button,[data-acct],[data-order],[data-cust],[data-loc],[data-go]"); if (!t) return;
   const d = t.dataset;
   if (d.reload){ load(); return; }
   if (d.back){ goBack(); return; }
@@ -455,6 +608,10 @@ root.addEventListener("click", async e => {
   if (d.sm){ S.sMode = d.sm; render(); return; }
   if (d.tk){ readTouch(); S.tForm.kind = d.tk; render(); return; }
   if (d.tsave){ await saveTouch(); return; }
+  if (d.lrep){ S.lRep = d.lrep; S.mpConfirm = null; render(); return; }
+  if (d.mp){ S.mpConfirm = d.mp; render(); return; }
+  if (d.mpno){ S.mpConfirm = null; render(); return; }
+  if (d.mpyes){ await markPaid(d.mpyes); return; }
   if (d.allread){ S.data.notices.forEach(n => n.read = true); render(); try{ await api("noticesRead", {all: true}); }catch(_){} return; }
 });
 root.addEventListener("change", async e => {
@@ -467,7 +624,7 @@ async function load(){
   S.err = ""; S.errCode = ""; S.data = null; render();
   try{
     const r = await api("load");
-    S.data = {me: r.me, shop: r.shop || {}, accounts: r.accounts || [], touchpoints: r.touchpoints || [], notices: r.notices || [], prefs: r.prefs || {}, paidThrough: r.paidThrough, portalStart: r.portalStart || r.today};
+    S.data = {me: r.me, shop: r.shop || {}, accounts: r.accounts || [], touchpoints: r.touchpoints || [], notices: r.notices || [], prefs: r.prefs || {}, paidThrough: r.paidThrough, portalStart: r.portalStart || r.today, ledger: r.ledger || null, ledgers: r.ledgers || null, reps: r.reps || null};
     if (r.today) TODAY = r.today;
   }catch(e){ S.err = e.message; S.errCode = e.code || ""; }
   render();
