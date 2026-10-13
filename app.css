@@ -414,3 +414,21 @@ a.btn:hover{text-decoration:none}
   .tbl.st td.tc{display:table-cell}
   .bon .bv{justify-content:flex-start;text-align:left}
 }
+/* statements list */
+.stm+.stm{border-top:1px solid #ebebeb}
+.stmh{all:unset;box-sizing:border-box;display:grid;grid-template-columns:18px 1fr auto auto auto;gap:12px;align-items:center;width:100%;padding:12px 16px;cursor:pointer}
+.stmh:hover{background:#fafafa}
+.stmh .m{display:flex;flex-direction:column;min-width:0}
+.stmh .m b{font-weight:600}
+.stmh .chev{width:16px;height:16px;color:#8a8a8a;transition:transform .15s}
+.stmh .chev svg{width:16px;height:16px}
+.stm.open .chev{transform:rotate(90deg)}
+.stmh .hn2{color:#616161;font-size:12px}
+.stmb{padding:0 0 6px}
+.tbl tr.nohov td{cursor:default}
+.tbl.ec td:first-child{min-width:170px}
+@container pn (max-width: 620px){
+  .stmh{grid-template-columns:16px 1fr auto;row-gap:2px}
+  .stmh .hn2{display:none}
+  .stmh .bd{grid-column:2;justify-self:start}
+}

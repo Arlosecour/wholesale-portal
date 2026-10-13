@@ -165,7 +165,7 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + IC[n] + "</svg>";
 
 /* ---------- state ---------- */
-const S = {data: null, err: "", view: "home", hist: [], acct: null, locId: null, custId: null, okey: null, oFilter: "all", tForm: null, tErr: {}, sMode: "placed", sYear: null, busy: false, lRep: null, mpConfirm: null};
+const S = {data: null, err: "", view: "home", hist: [], acct: null, locId: null, custId: null, okey: null, oFilter: "all", tForm: null, tErr: {}, sMode: "placed", sYear: null, busy: false, lRep: null, mpConfirm: null, stOpen: null};
 const NAV = [["home", "Home"], ["companies", "Companies"], ["customers", "Customers"], ["orders", "Orders"], ["touch", "Touchpoints"], ["sales", "Sales"], ["earnings", "Earnings"]];
 
 /* ---------- server ---------- */
@@ -272,7 +272,7 @@ const ph = (title, badges, acts, sub) => '<div class="ph"><h1>' + title + "</h1>
 function unread(){ return S.data ? S.data.notices.filter(n => !n.read).length : 0; }
 function shell(){
   const n = unread(), v = S.view;
-  const on = k => (k === v || (k === "companies" && (v === "company" || v === "location")) || (k === "customers" && v === "customer") || (k === "orders" && v === "order")) ? " on" : "";
+  const on = k => (k === v || (k === "companies" && (v === "company" || v === "location")) || (k === "customers" && v === "customer") || (k === "orders" && v === "order") || (k === "earnings" && v === "earnco")) ? " on" : "";
   $("rpTop").innerHTML = '<div class="tb"><div class="brand"><span class="logo">AS</span><span><b>Wholesale portal</b><span>' + esc(S.data ? S.data.me.name : "") + "</span></span></div>" +
     '<nav class="navtabs" aria-label="Portal">' + NAV.map(x => '<button data-go="' + x[0] + '" class="' + on(x[0]) + '">' + x[1] + "</button>").join("") + "</nav>" +
     '<button class="bell' + on("notices") + '" data-go="notices" aria-label="Notifications">' + ic("bell") + (n ? '<span class="dot">' + n + "</span>" : "") + "</button></div>";
@@ -282,7 +282,7 @@ function render(){
   shell();
   const m = $("rpMain");
   if (!S.data){ m.innerHTML = '<div class="pg">' + (S.err ? '<div class="card empty"><b>' + (S.errCode === "not_rep" ? "You’re not set up for the portal yet" : "Couldn’t load the portal") + "</b>" + esc(S.err) + (S.errCode === "not_rep" ? "" : '<div style="margin-top:12px"><button class="btn pri" data-reload="1">Try again</button></div>') + "</div>" : '<div class="empty">Loading…</div>') + "</div>"; return; }
-  const V = {home: vHome, companies: vCompanies, company: vCompany, location: vLocation, customers: vCustomers, customer: vCustomer, orders: vOrders, order: vOrder, touch: vTouch, sales: vSales, earnings: vEarnings, notices: vNotices}[S.view] || vHome;
+  const V = {home: vHome, companies: vCompanies, company: vCompany, location: vLocation, customers: vCustomers, customer: vCustomer, orders: vOrders, order: vOrder, touch: vTouch, sales: vSales, earnings: vEarnings, earnco: vEarnCo, notices: vNotices}[S.view] || vHome;
   m.innerHTML = V();
 }
 function go(view, opt){
@@ -537,28 +537,68 @@ function bonusRows(a, p){
     '<p class="mut sm" style="margin-top:6px">' + (p.inYearOne ? "Year one ends " + fd(p.yearEnd) + ". Bonuses count paid orders placed in the first 12 months." : "Year one ended " + fd(p.yearEnd) + ". " + plural(p.reorders12, "paid reorder") + " in the last 12 months (2 keep the 10% rate).") + "</p></div>";
 }
 function bonusAside(a){ const L = ledger(); return L && L.progress[a.id] ? aside("Year-one bonuses", bonusRows(a, L.progress[a.id])) : ""; }
-function vEarnings(){
+/* ---------- earnings: summary → by company → statements ---------- */
+function eCtx(){
   const L = ledger(), d = S.data, admin = d.me.role === "admin";
   const repPick = admin && d.reps && d.reps.length > 1 ? '<div class="segm">' + d.reps.map(r => '<button data-lrep="' + esc(r.staffId) + '" class="' + ((S.lRep || d.reps[0].staffId) === r.staffId ? "on" : "") + '">' + esc(r.name) + "</button>").join("") + "</div>" : "";
   const who = admin && d.reps && d.reps.length ? (d.reps.find(r => r.staffId === (S.lRep || d.reps[0].staffId)) || d.reps[0]) : null;
+  return {L, d, admin, repPick, who};
+}
+const sum = (xs, f) => Math.round(xs.reduce((s, x) => s + (f ? f(x) : x.amount), 0) * 100) / 100;
+function stLine(l, showCo){
+  return '<tr' + (l.orderId ? ' data-order="' + esc(l.orderId) + '"' : "") + '><td><span class="b">' + esc(l.type === "bonus" ? l.label : (l.order + " · " + l.label)) + "</span>" + (l._st ? " " + (l.paid ? bd("Paid", "ok") : bd("Owed", "att")) : "") + (l.carried ? '<span class="two">carried from the ' + fdt(l.carried) + " statement</span>" : "") +
+    '<span class="two sm-only">' + esc([showCo ? l.company : "", l.rate ? Math.round(l.rate * 100) + "% of " + money2(l.base) : ""].filter(Boolean).join(" · ")) + "</span></td>" +
+    (showCo ? '<td class="hn">' + esc(l.company || "—") + "</td>" : "") + '<td class="mut nw">' + fdt(l.date) + '</td><td class="r num hn">' + (l.base != null ? money2(l.base) : "") + '</td><td class="r num hn">' + (l.rate ? Math.round(l.rate * 100) + "%" : "") + '</td><td class="r num">' + money2(l.amount) + "</td></tr>";
+}
+function linesTable(lines, showCo, totalLabel){
+  const c = sum(lines.filter(l => l.type === "commission")), b = sum(lines.filter(l => l.type === "bonus"));
+  return '<div class="twrap"><table class="tbl st"><thead><tr><th>Item</th>' + (showCo ? '<th class="hn">Company</th>' : "") + '<th>Date</th><th class="r hn">Base</th><th class="r hn">Rate</th><th class="r">Amount</th></tr></thead><tbody>' +
+    lines.map(l => stLine(l, showCo)).join("") + '<tr><td class="b">' + (totalLabel || "Total") + (b && c ? '<span class="two" style="font-weight:400">' + money2(c) + " commission + " + money2(b) + " bonuses</span>" : "") + "</td>" + (showCo ? '<td class="hn"></td>' : "") + '<td></td><td class="hn"></td><td class="hn"></td><td class="r num b">' + money2(c + b) + "</td></tr></tbody></table></div>";
+}
+function bonusMini(p){
+  if (!p || !p.opening) return '<span class="mut">—</span>';
+  if (p.house) return bd("House account", "nodot");
+  const n = (p.fast.status === "earned" ? 1 : 0) + (p.loyal.status === "earned" ? 1 : 0) + (p.quality.tier ? 1 : 0);
+  return '<span class="b" style="font-weight:450">' + n + " of 3 earned</span>" + '<span class="two">' + (p.inYearOne ? "year one ends " + fdt(p.yearEnd) : "year one complete") + "</span>";
+}
+function vEarnings(){
+  const {L, d, admin, repPick, who} = eCtx();
   if (!L) return '<div class="pg">' + ph("Earnings", "", repPick, "") + '<div class="card empty"><b>No earnings yet</b>' + (admin ? "Add a rep on the Reps tab to see their statements." : "Commission shows up here once an invoice is paid in full.") + "</div></div>";
-  const ns = nextSt(L), wt = L.waiting.reduce((s, x) => s + x.amount, 0), bonusTot = L.lines.filter(l => l.type === "bonus").reduce((s, l) => s + l.amount, 0);
-  const accts = admin ? d.accounts.filter(a => L.progress[a.id]) : d.accounts;
-  const stRow = l => '<tr' + (l.orderId ? ' data-order="' + esc(l.orderId) + '"' : "") + '><td><span class="b">' + esc(l.type === "bonus" ? l.label : (l.order + " · " + l.label)) + "</span>" + (l.carried ? '<span class="two">carried from the ' + fdt(l.carried) + " statement</span>" : "") + '<span class="two sm-only">' + esc([l.company, l.rate ? Math.round(l.rate * 100) + "% of " + money2(l.base) : ""].filter(Boolean).join(" · ")) + '</span></td><td class="hn">' + esc(l.company || "—") + '</td><td class="mut nw">' + fdt(l.date) + '</td><td class="r num hn">' + (l.base != null ? money2(l.base) : "") + '</td><td class="r num hn">' + (l.rate ? Math.round(l.rate * 100) + "%" : "") + '</td><td class="r num">' + money2(l.amount) + "</td></tr>";
+  const ns = nextSt(L), wt = sum(L.waiting), owed = L.owed;
+  const ids = Object.keys(L.progress), accts = ids.map(id => d.accounts.find(a => a.id === id)).filter(Boolean);
+  const rep = L.lines.filter(l => !l.acct), y = TODAY.slice(0, 4);
+  const rows = accts.map(a => { const ls = L.lines.filter(l => l.acct === a.id), w = L.waiting.filter(x => x.acct === a.id);
+    return {a, p: L.progress[a.id], comm: sum(ls.filter(l => l.type === "commission")), bon: sum(ls.filter(l => l.type === "bonus")), owed: sum(ls.filter(l => !l.paid)), wait: sum(w), sales: sum(a.orders.filter(o => !o.cancelled && o.placed.slice(0, 4) === y), orderNet)}; })
+    .sort((p, q) => q.owed - p.owed || q.comm + q.bon - p.comm - p.bon);
   const payBtn = st => !admin || st.status === "paid" ? "" : S.mpConfirm === st.date ? '<span class="row" style="gap:6px"><button class="btn" data-mpno="1">Cancel</button><button class="btn pri" data-mpyes="' + st.date + '"' + (S.busy ? " disabled" : "") + ">" + (S.busy ? "Saving…" : "Confirm: paid " + money2(st.total)) + "</button></span>" : st.status !== "due" ? "" : '<button class="btn out" data-mp="' + st.date + '">Mark paid</button>';
-  return '<div class="pg">' + ph("Earnings" + (who ? " · " + esc(who.name) : ""), "", repPick, "Paid on the 1st for invoices paid in full the month before. 15% on opening orders, 10% on reorders, on the order total after discounts and refunds — shipping and tax excluded.") +
+  const open = st => S.stOpen ? S.stOpen[st.date] : st.date === L.nextStatement;
+  return '<div class="pg">' + ph("Earnings" + (who ? " · " + esc(who.name) : ""), "", repPick, "Paid on the 1st for invoices paid in full the month before.") +
     '<div class="card sec"><div class="mets">' +
-      met("Next statement", money2(ns ? ns.total : 0), "on " + fdt(L.nextStatement) + (ns && ns.status === "building" ? " · still adding" : "")) +
-      met("Paid in " + TODAY.slice(0, 4), money2(L.paidYtd), L.paidThrough ? "paid through " + fdt(L.paidThrough) : "") +
-      met("Waiting on payment", money2(wt), plural(L.waiting.length, "open invoice")) +
-      met("Bonuses earned", money2(bonusTot), "welcome + year-one") +
+      met("Next statement", money2(ns ? ns.total : 0), "on " + fdt(L.nextStatement) + (ns && ns.bonuses ? " · " + money2(ns.bonuses) + " in bonuses" : "")) +
+      met("Owed to you", money2(owed), owed ? "earned, not yet paid" : "all caught up") +
+      met("Waiting on payment", money2(wt), plural(L.waiting.length, "open invoice") + " · est.") +
+      met("Paid in " + y, money2(L.paidYtd), L.paidThrough ? "paid through " + fdt(L.paidThrough) : "") +
     "</div></div>" +
-    (accts.length ? sec("Year-one bonuses", "", '<div class="card cp">' + accts.map(a => '<div class="bonacct"><h3>' + esc(a.name) + "</h3>" + bonusRows(a, L.progress[a.id]) + "</div>").join("") + "</div>") : "") +
-    L.statements.map(st => sec(fd(st.date) + " statement", '<span class="row" style="gap:8px">' + stBadge(st) + payBtn(st) + "</span>",
-      '<div class="card"><div class="twrap"><table class="tbl st"><thead><tr><th>Item</th><th class="hn">Company</th><th>Date</th><th class="r hn">Base</th><th class="r hn">Rate</th><th class="r">Amount</th></tr></thead><tbody>' +
-      st.lines.map(stRow).join("") + '<tr><td class="b">Total' + (st.bonuses && st.commission ? '<span class="two" style="font-weight:400">' + money2(st.commission) + " commission + " + money2(st.bonuses) + " bonuses</span>" : "") + '</td><td class="hn"></td><td></td><td class="hn"></td><td class="hn"></td><td class="r num b">' + money2(st.total) + "</td></tr></tbody></table></div>" +
-      '<p class="mut sm cpx">' + (st.status === "building" ? "Invoices paid in " + MONL[+st.covers.slice(5) - 1] + " are still being added." : "Invoices paid in " + MONL[+st.covers.slice(5) - 1] + " " + st.covers.slice(0, 4) + ".") + "</p></div>")).join("") +
-    (L.waiting.length ? sec("Waiting on payment", '<span class="mut">commission once paid in full</span>', '<div class="card"><div class="twrap"><table class="tbl"><thead><tr><th>Order</th><th>Company</th><th>Placed</th><th class="r">Base</th><th class="r">Est.</th></tr></thead><tbody>' + L.waiting.map(x => '<tr data-order="' + esc(x.orderId) + '"><td class="b">' + esc(x.order) + "</td><td>" + esc(x.company) + '</td><td class="mut">' + fdt(x.placed) + '</td><td class="r num">' + money2(x.base) + '</td><td class="r num">' + money2(x.amount) + "</td></tr>").join("") + "</tbody></table></div></div>") : "") +
+    sec("By company", '<span class="mut">' + rows.length + (rows.length === 1 ? " company" : " companies") + "</span>", '<div class="card">' + (rows.length ? '<div class="twrap"><table class="tbl rsp ec"><thead><tr><th>Company</th><th class="r">' + y + ' sales</th><th class="r">Commission</th><th class="r">Bonuses</th><th class="r">Owed now</th><th>Year-one bonuses</th></tr></thead><tbody>' +
+      rows.map(r => '<tr data-eco="' + esc(r.a.id) + '"><td><span class="b">' + esc(r.a.name) + "</span>" + (r.wait ? '<span class="two">' + money2(r.wait) + " waiting on payment</span>" : "") + '</td><td class="r num">' + money2(r.sales) + '</td><td class="r num">' + money2(r.comm) + '</td><td class="r num">' + money2(r.bon) + '</td><td class="r num' + (r.owed ? " b" : " mut") + '">' + money2(r.owed) + "</td><td>" + bonusMini(r.p) + "</td></tr>").join("") +
+      (rep.length ? '<tr class="nohov"><td><span class="b">Welcome bonus</span><span class="two">not tied to a company</span></td><td></td><td></td><td class="r num">' + money2(sum(rep)) + '</td><td class="r num mut">' + money2(sum(rep.filter(l => !l.paid))) + "</td><td></td></tr>" : "") +
+      "</tbody></table></div>" +
+      '<div class="mlist">' + rows.map(r => '<div class="mrow" data-eco="' + esc(r.a.id) + '"><div class="m"><b>' + esc(r.a.name) + '</b><span class="mut">' + money2(r.comm) + " commission · " + money2(r.bon) + " bonuses</span>" + (r.p && r.p.opening && !r.p.house ? '<span class="mut sm">Year-one bonuses: ' + ((r.p.fast.status === "earned" ? 1 : 0) + (r.p.loyal.status === "earned" ? 1 : 0) + (r.p.quality.tier ? 1 : 0)) + " of 3 earned</span>" : "") + "</div><div class=\"e\"><b class=\"num\">" + money2(r.owed) + '</b><span class="mut sm">owed</span></div></div>').join("") + "</div>"
+      : '<div class="empty">No companies yet.</div>') + "</div>") +
+    sec("Statements", "", '<div class="card">' + L.statements.map(st => '<div class="stm' + (open(st) ? " open" : "") + '"><button class="stmh" data-st="' + st.date + '"><span class="chev">' + ic("chev") + '</span><span class="m"><b>' + fd(st.date) + '</b><span class="mut sm">' + (st.status === "building" ? "invoices paid in " + MONL[+st.covers.slice(5) - 1] + " so far" : "invoices paid in " + MONL[+st.covers.slice(5) - 1]) + '</span></span><span class="r num hn2">' + (st.bonuses ? money2(st.commission) + " + " + money2(st.bonuses) + " bonus" : "") + '</span><b class="r num">' + money2(st.total) + "</b>" + stBadge(st) + "</button>" +
+      (open(st) ? '<div class="stmb">' + (payBtn(st) ? '<div class="row" style="justify-content:flex-end;padding:0 16px 8px">' + payBtn(st) + "</div>" : "") + linesTable(st.lines, rows.length > 1 || st.lines.some(l => !l.acct)) + "</div>" : "") + "</div>").join("") + "</div>") +
+    (L.waiting.length ? sec("Waiting on payment", '<span class="mut">commission once paid in full</span>', '<div class="card"><div class="twrap"><table class="tbl"><thead><tr><th>Order</th><th>Company</th><th>Placed</th><th class="r">Base</th><th class="r">Est.</th></tr></thead><tbody>' + L.waiting.slice().sort((p, q) => p.placed < q.placed ? 1 : -1).slice(0, S.wAll ? 999 : 5).map(x => '<tr data-order="' + esc(x.orderId) + '"><td class="b">' + esc(x.order) + "</td><td>" + esc(x.company) + '</td><td class="mut">' + fdt(x.placed) + '</td><td class="r num">' + money2(x.base) + '</td><td class="r num">' + money2(x.amount) + "</td></tr>").join("") + "</tbody></table></div>" + (L.waiting.length > 5 ? '<div class="row" style="justify-content:center;padding:8px"><button class="btn plain" data-wall="1">' + (S.wAll ? "Show fewer" : "Show all " + L.waiting.length) + "</button></div>" : "") + "</div>") : "") +
+    '<p class="mut sm" style="margin-top:4px">15% on opening orders and 10% on reorders, on the order total after discounts and refunds — shipping and tax excluded. Bonuses are paid once the qualifying invoice is paid in full.</p>' +
+    "</div>";
+}
+/* one company's earnings */
+function vEarnCo(){
+  const {L, d} = eCtx(), a = acctOf(S.acct), p = L && a && L.progress[a.id]; if (!p) return vEarnings();
+  const ls = L.lines.filter(l => l.acct === a.id).slice().sort((x, y) => x.date < y.date ? 1 : -1), w = L.waiting.filter(x => x.acct === a.id);
+  return '<div class="pg">' + back("Earnings") + ph(esc(a.name), standingBadge(a), '<button class="btn out" data-acct="' + esc(a.id) + '">Company details</button>', "Opening order " + esc(p.opening) + " · " + fd(p.openingDate)) +
+    '<div class="card sec"><div class="mets">' + met("Commission", money2(sum(ls.filter(l => l.type === "commission"))), "all time") + met("Bonuses", money2(sum(ls.filter(l => l.type === "bonus"))), "year one") + met("Owed now", money2(sum(ls.filter(l => !l.paid))), "earned, not yet paid") + met("Waiting on payment", money2(sum(w)), plural(w.length, "open invoice")) + "</div></div>" +
+    sec("Year-one bonuses", "", '<div class="card cp">' + bonusRows(a, p) + "</div>") +
+    sec("Everything earned", '<span class="mut">newest first</span>', '<div class="card">' + (ls.length ? linesTable(ls.map(l => Object.assign({}, l, {carried: l.paid ? "" : l.carried, _st: true})), false) + '<p class="mut sm cpx">Each line goes on the statement for the month its invoice was paid. Owed lines are on your next statement.</p>' : '<div class="empty">Nothing earned yet.</div>') + "</div>") +
     "</div>";
 }
 async function markPaid(date){
@@ -593,7 +633,7 @@ function toast(t){ $("rpToast").innerHTML = '<div class="toast">' + esc(t) + "</
 const root = $("rp");
 root.addEventListener("click", async e => {
   if (e.target.closest("a")) return;
-  const t = e.target.closest("button,[data-acct],[data-order],[data-cust],[data-loc],[data-go]"); if (!t) return;
+  const t = e.target.closest("button,[data-acct],[data-order],[data-cust],[data-loc],[data-go],[data-eco]"); if (!t) return;
   const d = t.dataset;
   if (d.reload){ load(); return; }
   if (d.back){ goBack(); return; }
@@ -608,7 +648,10 @@ root.addEventListener("click", async e => {
   if (d.sm){ S.sMode = d.sm; render(); return; }
   if (d.tk){ readTouch(); S.tForm.kind = d.tk; render(); return; }
   if (d.tsave){ await saveTouch(); return; }
-  if (d.lrep){ S.lRep = d.lrep; S.mpConfirm = null; render(); return; }
+  if (d.lrep){ S.lRep = d.lrep; S.mpConfirm = null; S.stOpen = null; render(); return; }
+  if (d.eco){ go("earnco", {acct: d.eco}); return; }
+  if (d.wall){ S.wAll = !S.wAll; render(); return; }
+  if (d.st){ const L = ledger(); if (!S.stOpen){ S.stOpen = {}; if (L) S.stOpen[L.nextStatement] = true; } S.stOpen[d.st] = !S.stOpen[d.st]; render(); return; }
   if (d.mp){ S.mpConfirm = d.mp; render(); return; }
   if (d.mpno){ S.mpConfirm = null; render(); return; }
   if (d.mpyes){ await markPaid(d.mpyes); return; }
