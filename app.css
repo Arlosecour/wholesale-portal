@@ -432,3 +432,11 @@ a.btn:hover{text-decoration:none}
   .stmh .hn2{display:none}
   .stmh .bd{grid-column:2;justify-self:start}
 }
+/* search boxes on lists */
+.lsearch{position:relative;padding:10px 12px;border-bottom:1px solid #ebebeb}
+.lsearch svg{position:absolute;left:22px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:#8a8a8a;fill:none;stroke:currentColor;stroke-width:2}
+.lsearch input{width:100%;height:32px;border:1px solid #c9cccf;border-radius:8px;padding:0 10px 0 32px;font:inherit;font-size:13px;background:#fff;color:#303030}
+.lsearch input:focus{outline:2px solid #005bd3;outline-offset:-1px;border-color:transparent}
+.tabs+.lsearch{border-top:0}
+.lfoot{display:flex;justify-content:center;padding:8px;border-top:1px solid #ebebeb}
+.lfoot.mut{justify-content:flex-start;padding:8px 16px}

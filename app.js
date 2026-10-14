@@ -160,12 +160,13 @@ const IC = {
   left: '<path d="m15 6-6 6 6 6"/>',
   ext: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
-  chev: '<path d="m9 6 6 6-6 6"/>'
+  chev: '<path d="m9 6 6 6-6 6"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>'
 };
 const ic = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + IC[n] + "</svg>";
 
 /* ---------- state ---------- */
-const S = {data: null, err: "", view: "home", hist: [], acct: null, locId: null, custId: null, okey: null, oFilter: "all", tForm: null, tErr: {}, sMode: "placed", sYear: null, busy: false, lRep: null, mpConfirm: null, stOpen: null};
+const S = {data: null, err: "", view: "home", hist: [], acct: null, locId: null, custId: null, okey: null, oFilter: "all", tForm: null, tErr: {}, sMode: "placed", sYear: null, busy: false, lRep: null, mpConfirm: null, stOpen: null, q: {}, more: {}};
 const NAV = [["home", "Home"], ["companies", "Companies"], ["customers", "Customers"], ["orders", "Orders"], ["touch", "Touchpoints"], ["sales", "Sales"], ["earnings", "Earnings"]];
 
 /* ---------- server ---------- */
@@ -268,6 +269,26 @@ const img = src => src ? '<img class="thumb" src="' + esc(src) + '" alt="" loadi
 const back = (label) => '<div class="bc"><button class="back" data-back="1" aria-label="Back">' + ic("left") + '</button><span class="crumb">' + esc(label) + "</span></div>";
 const ph = (title, badges, acts, sub) => '<div class="ph"><h1>' + title + "</h1>" + (badges || "") + '<div class="acts">' + (acts || "") + "</div>" + (sub ? '<div class="sub">' + sub + "</div>" : "") + "</div>";
 
+/* ---------- searchable lists: show the latest few, search finds the rest ---------- */
+const LISTS = {};
+const norm = t => String(t == null ? "" : t).toLowerCase().replace(/[$,]/g, "");
+const hit = (txt, q) => { const t = norm(txt); return norm(q).split(/\s+/).filter(Boolean).every(w => t.indexOf(w) > -1); };
+/* key: unique id · items: [{s: searchable text, ...}] · render(items) → html · opt: {limit, ph, empty, noun} */
+function listBody(key, q){
+  const L = LISTS[key]; if (!L) return "";
+  const {items, render, opt} = L, lim = opt.limit || 5, f = q ? items.filter(x => hit(x.s, q)) : items;
+  const all = q || (S.more && S.more[key]), shown = all ? f : f.slice(0, lim), noun = opt.noun || ["item", "items"];
+  if (!f.length) return '<div class="empty">' + (q ? "No " + noun[1] + " match “" + esc(q) + "”." : (opt.empty || "Nothing here yet.")) + "</div>";
+  return render(shown, !!q) + (q ? '<div class="lfoot mut sm">' + f.length + " of " + items.length + " " + noun[items.length === 1 ? 0 : 1] + " match</div>"
+    : f.length > lim ? '<div class="lfoot"><button class="btn plain" data-more="' + key + '">' + (all ? "Show fewer" : "Show all " + f.length + " " + noun[1]) + "</button></div>" : "");
+}
+function listCard(key, items, render, opt){
+  opt = opt || {}; LISTS[key] = {items, render, opt};
+  const q = (S.q && S.q[key]) || "", lim = opt.limit || 5;
+  const box = items.length > Math.min(lim, 3) || q ? '<div class="lsearch">' + ic("search") + '<input type="search" data-q="' + key + '" value="' + esc(q) + '" placeholder="' + esc(opt.ph || "Search") + '" aria-label="' + esc(opt.ph || "Search") + '"></div>' : "";
+  return '<div class="card' + (opt.cls ? " " + opt.cls : "") + '">' + (opt.top || "") + box + '<div data-list="' + key + '">' + listBody(key, q) + "</div></div>";
+}
+
 /* ---------- shell ---------- */
 function unread(){ return S.data ? S.data.notices.filter(n => !n.read).length : 0; }
 function shell(){
@@ -291,6 +312,7 @@ function go(view, opt){
   if (S.hist.length > 30) S.hist.shift();
   ["acct", "locId", "custId", "okey"].forEach(k => { if (opt[k] !== undefined) S[k] = opt[k]; });
   if (view === "touch" && opt.acctForTouch){ S.tForm = blankTouch(opt.acctForTouch); S.tErr = {}; }
+  if (!opt.isBack){ Object.keys(S.q).forEach(k => { if (/^co:|^ec:/.test(k)) delete S.q[k]; }); }
   S.view = view; render(); window.scrollTo(0, 0);
   if (view === "notices" && S.data && unread()){
     const ids = S.data.notices.filter(n => !n.read).map(n => n.id);
@@ -342,7 +364,9 @@ function vOrders(){
   const F = [["all", "All"], ["unpaid", "Payment pending"], ["paid", "Paid"], ["unful", "Unfulfilled"]];
   const pass = (x, f) => f === "all" || (f === "unpaid" && !x.o.paid && !x.o.cancelled) || (f === "paid" && !!x.o.paid) || (f === "unful" && !x.o.fulfilled && !x.o.cancelled);
   return '<div class="pg wide">' + ph("Orders", "", aLink("draft_orders/new", "Create order in Shopify", "btn pri"), "Every order from your companies, however it was placed. Every one counts toward your sales.") +
-    '<div class="card"><div class="tabs">' + F.map(f => '<button data-of="' + f[0] + '" class="' + (S.oFilter === f[0] ? "on" : "") + '">' + f[1] + (f[0] !== "all" ? ' <span class="mut">' + all.filter(x => pass(x, f[0])).length + "</span>" : "") + "</button>").join("") + "</div>" + ordersTable(all.filter(x => pass(x, S.oFilter))) + "</div></div>";
+    listCard("orders:" + S.oFilter, all.filter(x => pass(x, S.oFilter)).map(x => Object.assign(x, {s: [x.o.name, x.o.po, x.acct.name, fd(x.date), MONL[+x.date.slice(5, 7) - 1], x.o.customer && contactOf(x.o.customer) ? cName(contactOf(x.o.customer).c) : ""].join(" ")})), xs => ordersTable(xs),
+      {limit: 10, ph: "Search order #, PO, company, customer or month", noun: ["order", "orders"], empty: "No orders here yet.",
+       top: '<div class="tabs">' + F.map(f => '<button data-of="' + f[0] + '" class="' + (S.oFilter === f[0] ? "on" : "") + '">' + f[1] + (f[0] !== "all" ? ' <span class="mut">' + all.filter(x => pass(x, f[0])).length + "</span>" : "") + "</button>").join("") + "</div>"}) + "</div>";
 }
 function vOrder(){
   const x = allOrders().find(z => z.o.id === S.okey); if (!x) return vOrders();
@@ -384,10 +408,11 @@ function vOrder(){
 function vCompanies(){
   const rows = S.data.accounts.map(a => ({a, st: stats(a), q: curQ(a)}));
   return '<div class="pg wide">' + ph("Companies", "", aLink("companies", ic("ext") + "Companies in Shopify"), "The companies assigned to you in Shopify. To add or change a company, use Shopify.") +
-    '<div class="card">' + (rows.length ? '<table class="tbl rsp"><thead><tr><th>Company</th><th>Main contact</th><th class="r">Locations</th><th class="r">Orders</th><th class="r">Total sales</th><th>Last order</th><th>Touchpoint</th><th>Standing</th></tr></thead><tbody>' +
-      rows.map(r => '<tr data-acct="' + esc(r.a.id) + '"><td><span class="b">' + esc(r.a.name) + '</span><span class="two">' + esc(r.a.externalId || "") + "</span></td><td>" + esc(r.a.contacts[0] ? cName(r.a.contacts[0]) : "—") + '</td><td class="r num">' + r.a.locations.length + '</td><td class="r num">' + r.st.orders.length + '</td><td class="r num">' + money2(r.st.life) + '</td><td class="mut">' + (r.st.last ? fdt(r.st.last.placed) : "—") + "</td><td>" + (r.q.st === "ok" ? bd("Q" + r.q.q + " logged", "ok") : bd("Q" + r.q.q + " due " + fdt(r.q.end), r.q.left <= 21 ? "warn ring" : "ring")) + "</td><td>" + standingBadge(r.a) + "</td></tr>").join("") + "</tbody></table>" +
-      '<div class="mlist">' + rows.map(r => '<div class="mrow" data-acct="' + esc(r.a.id) + '"><div class="m"><b>' + esc(r.a.name) + '</b><span class="mut">' + plural(r.st.orders.length, "order") + " · last " + (r.st.last ? fdt(r.st.last.placed) : "—") + '</span></div><div class="e"><b class="num">' + money2(r.st.life) + "</b>" + standingBadge(r.a) + "</div></div>").join("") + "</div>"
-    : '<div class="empty"><b>No companies assigned yet</b>Arlo Secour assigns companies to you in Shopify.</div>') + "</div></div>";
+    listCard("companies", rows.map(r => Object.assign(r, {s: [r.a.name, r.a.externalId, r.a.contacts.map(cName).join(" "), r.a.locations.map(L => [L.name, L.ship && L.ship.city, L.ship && L.ship.zone].join(" ")).join(" ")].join(" ")})), xs =>
+      '<table class="tbl rsp"><thead><tr><th>Company</th><th>Main contact</th><th class="r">Locations</th><th class="r">Orders</th><th class="r">Total sales</th><th>Last order</th><th>Touchpoint</th><th>Standing</th></tr></thead><tbody>' +
+      xs.map(r => '<tr data-acct="' + esc(r.a.id) + '"><td><span class="b">' + esc(r.a.name) + '</span><span class="two">' + esc(r.a.externalId || "") + "</span></td><td>" + esc(r.a.contacts[0] ? cName(r.a.contacts[0]) : "—") + '</td><td class="r num">' + r.a.locations.length + '</td><td class="r num">' + r.st.orders.length + '</td><td class="r num">' + money2(r.st.life) + '</td><td class="mut">' + (r.st.last ? fdt(r.st.last.placed) : "—") + "</td><td>" + (r.q.st === "ok" ? bd("Q" + r.q.q + " logged", "ok") : bd("Q" + r.q.q + " due " + fdt(r.q.end), r.q.left <= 21 ? "warn ring" : "ring")) + "</td><td>" + standingBadge(r.a) + "</td></tr>").join("") + "</tbody></table>" +
+      '<div class="mlist">' + xs.map(r => '<div class="mrow" data-acct="' + esc(r.a.id) + '"><div class="m"><b>' + esc(r.a.name) + '</b><span class="mut">' + plural(r.st.orders.length, "order") + " · last " + (r.st.last ? fdt(r.st.last.placed) : "—") + '</span></div><div class="e"><b class="num">' + money2(r.st.life) + "</b>" + standingBadge(r.a) + "</div></div>").join("") + "</div>",
+      {limit: 10, ph: "Search company, contact or city", noun: ["company", "companies"], empty: '<b>No companies assigned yet</b>Arlo Secour assigns companies to you in Shopify.'}) + "</div>";
 }
 function vCompany(){
   const a = acctOf(S.acct); if (!a) return vCompanies();
@@ -399,8 +424,10 @@ function vCompany(){
   return '<div class="pg wide">' + back("Companies") + ph(esc(a.name), standingBadge(a), '<button class="btn out" data-tp="' + esc(a.id) + '">Log touchpoint</button>' + aLink("companies/" + gidNum(a.id), ic("ext") + "Open in Shopify", "btn pri"), "Customer for " + plural(months, "month") + (a.externalId ? " · " + esc(a.externalId) : "")) +
     '<div class="lay"><div>' +
       '<div class="card sec"><div class="mets">' + met("Total sales", money2(st.life), "all time") + met("Total orders", st.orders.length, st.open ? "opening " + fdt(st.open.placed) : "none yet") + met("Reorders every", st.avgGap ? "~" + st.avgGap + " days" : "—", st.next ? "next around " + fdt(st.next) : "after a second order") + met("First year", yr != null ? (yr > 0 ? yr + " days left" : "Complete") : "—", st.yearEnd ? "ends " + fd(st.yearEnd) : "") + "</div></div>" +
-      sec("Orders", "", '<div class="card">' + (list.length ? '<table class="tbl rsp"><thead><tr><th>Order</th><th>Customer</th><th>Order date</th><th class="r">Total</th><th>Payment</th></tr></thead><tbody>' + list.map(o => { const h = o.customer && contactOf(o.customer); return '<tr data-order="' + esc(o.id) + '"><td class="b">' + esc(o.name) + "</td><td>" + esc(h ? cName(h.c) : "") + '</td><td class="mut">' + fdt(o.placed) + '</td><td class="r num">' + money2(orderNet(o)) + "</td><td>" + payBadge(o) + "</td></tr>"; }).join("") + "</tbody></table>" +
-        '<div class="mlist">' + list.map(o => '<div class="mrow" data-order="' + esc(o.id) + '"><div class="m"><b>' + esc(o.name) + '</b><span class="mut">' + fd(o.placed) + '</span></div><div class="e"><b class="num">' + money2(orderNet(o)) + "</b>" + payBadge(o) + "</div></div>").join("") + "</div>" : '<div class="empty">No orders yet.</div>') + "</div>") +
+      sec("Orders", '<span class="mut">' + plural(list.length, "order") + "</span>", listCard("co:orders:" + a.id, list.map(o => ({o, s: [o.name, o.po, fd(o.placed), MONL[+o.placed.slice(5, 7) - 1], o.customer && contactOf(o.customer) ? cName(contactOf(o.customer).c) : ""].join(" ")})), xs =>
+        '<table class="tbl rsp"><thead><tr><th>Order</th><th>Customer</th><th>Order date</th><th class="r">Total</th><th>Payment</th></tr></thead><tbody>' + xs.map(({o}) => { const h = o.customer && contactOf(o.customer); return '<tr data-order="' + esc(o.id) + '"><td class="b">' + esc(o.name) + "</td><td>" + esc(h ? cName(h.c) : "") + '</td><td class="mut">' + fdt(o.placed) + '</td><td class="r num">' + money2(orderNet(o)) + "</td><td>" + payBadge(o) + "</td></tr>"; }).join("") + "</tbody></table>" +
+        '<div class="mlist">' + xs.map(({o}) => '<div class="mrow" data-order="' + esc(o.id) + '"><div class="m"><b>' + esc(o.name) + '</b><span class="mut">' + fd(o.placed) + '</span></div><div class="e"><b class="num">' + money2(orderNet(o)) + "</b>" + payBadge(o) + "</div></div>").join("") + "</div>",
+        {limit: 5, ph: "Search order #, PO or month", noun: ["order", "orders"], empty: "No orders yet."})) +
       sec("Locations", "", '<div class="card">' + a.locations.map(L => '<div class="mrow" data-loc="' + esc(L.id) + '"><div class="m"><b>' + esc(L.name || L.ship.address1) + '</b><span class="mut">' + esc(L.terms || "No payment terms") + " • " + (L.toDraft ? "Submit orders as drafts" : "Automatically submit orders") + '</span></div><div class="e">' + ic("chev") + "</div></div>").join("") + "</div>") +
       (topL.length ? sec("What they buy", '<span class="mut">sales by product type</span>', '<div class="card mrows">' + topL.map(k => '<div><div class="row"><span>' + esc(k) + '</span><b class="num">' + money2(top[k]) + '</b></div><div class="meter"><i style="width:' + Math.round(top[k] / maxT * 100) + '%"></i></div></div>').join("") + "</div>") : "") +
     '</div><div class="side-c">' +
@@ -437,10 +464,11 @@ function vLocation(){
 function vCustomers(){
   const rows = allContacts().map(x => Object.assign(x, {os: custOrders(x.c, x.a)}));
   return '<div class="pg wide">' + ph("Customers", "", aLink("customers", ic("ext") + "Customers in Shopify"), "People who buy for your companies. Add or change customers in Shopify.") +
-    '<div class="card">' + (rows.length ? '<table class="tbl rsp"><thead><tr><th>Customer name</th><th>Company</th><th>Location</th><th>Role</th><th class="r">Orders</th><th class="r">Amount spent</th></tr></thead><tbody>' +
-      rows.map(r => '<tr data-cust="' + esc(r.c.id) + '"><td><span class="b">' + esc(cName(r.c)) + '</span><span class="two">' + esc(r.c.email || r.c.phone || "") + "</span></td><td>" + esc(r.a.name) + '</td><td class="mut">' + esc(locName(r.a, r.c.loc)) + "</td><td>" + bd(esc(r.c.role || "Ordering only"), "nodot") + '</td><td class="r num">' + r.os.length + '</td><td class="r num">' + money2(r.os.reduce((s, x) => s + x.total, 0)) + "</td></tr>").join("") + "</tbody></table>" +
-      '<div class="mlist">' + rows.map(r => '<div class="mrow" data-cust="' + esc(r.c.id) + '"><div class="m"><b>' + esc(cName(r.c)) + '</b><span class="mut">' + esc(r.a.name) + '</span></div><div class="e"><b class="num">' + money2(r.os.reduce((s, x) => s + x.total, 0)) + "</b></div></div>").join("") + "</div>"
-    : '<div class="empty"><b>No customers yet</b></div>') + "</div></div>";
+    listCard("customers", rows.map(r => Object.assign(r, {s: [cName(r.c), r.c.email, r.c.phone, r.c.title, r.a.name, locName(r.a, r.c.loc)].join(" ")})), xs =>
+      '<table class="tbl rsp"><thead><tr><th>Customer name</th><th>Company</th><th>Location</th><th>Role</th><th class="r">Orders</th><th class="r">Amount spent</th></tr></thead><tbody>' +
+      xs.map(r => '<tr data-cust="' + esc(r.c.id) + '"><td><span class="b">' + esc(cName(r.c)) + '</span><span class="two">' + esc(r.c.email || r.c.phone || "") + "</span></td><td>" + esc(r.a.name) + '</td><td class="mut">' + esc(locName(r.a, r.c.loc)) + "</td><td>" + bd(esc(r.c.role || "Ordering only"), "nodot") + '</td><td class="r num">' + r.os.length + '</td><td class="r num">' + money2(r.os.reduce((s, x) => s + x.total, 0)) + "</td></tr>").join("") + "</tbody></table>" +
+      '<div class="mlist">' + xs.map(r => '<div class="mrow" data-cust="' + esc(r.c.id) + '"><div class="m"><b>' + esc(cName(r.c)) + '</b><span class="mut">' + esc(r.a.name) + '</span></div><div class="e"><b class="num">' + money2(r.os.reduce((s, x) => s + x.total, 0)) + "</b></div></div>").join("") + "</div>",
+      {limit: 10, ph: "Search name, email, phone or company", noun: ["customer", "customers"], empty: "<b>No customers yet</b>"}) + "</div>";
 }
 function vCustomer(){
   const h = contactOf(S.custId); if (!h) return vCustomers();
@@ -478,7 +506,9 @@ function vTouch(){
         '<div class="g2"><label class="fld"><span>Follow up on <i>(optional)</i></span><input id="tFol" type="date" min="' + TODAY + '" value="' + esc(f.follow) + '"></label><div></div></div>' +
         '<div class="row" style="justify-content:flex-end"><button class="btn pri" data-tsave="1"' + (S.busy ? " disabled" : "") + ">" + (S.busy ? "Sending…" : "Send to Arlo Secour") + "</button></div>" +
       "</div></div>") +
-      sec("History", '<span class="mut">' + plural(all.length, "touchpoint") + "</span>", '<div class="card">' + (all.length ? all.map(t => { const a = acctOf(t.acct); return '<div class="tl"><div class="h"><b>' + esc(a ? a.name : "") + "</b>" + bd(esc(t.kind), "nodot") + '<span class="mut">' + fd(t.date) + "</span>" + bd(esc(t.status), "info nodot") + "</div><p>" + esc(t.summary) + "</p>" + (t.statusNote ? '<p class="mut">Plans: ' + esc(t.statusNote) + "</p>" : "") + '<p class="mut">Feedback: ' + esc(t.feedback) + "</p></div>"; }).join("") : '<div class="empty">Touchpoints you send appear here.</div>') + "</div>") +
+      sec("History", '<span class="mut">' + plural(all.length, "touchpoint") + "</span>", listCard("touches", all.map(t => { const a = acctOf(t.acct); return Object.assign({}, t, {an: a ? a.name : "", s: [a ? a.name : "", t.kind, t.status, t.summary, t.feedback, t.statusNote, fd(t.date), MONL[+t.date.slice(5, 7) - 1]].join(" ")}); }), xs =>
+        xs.map(t => '<div class="tl"><div class="h"><b>' + esc(t.an) + "</b>" + bd(esc(t.kind), "nodot") + '<span class="mut">' + fd(t.date) + "</span>" + bd(esc(t.status), "info nodot") + "</div><p>" + esc(t.summary) + "</p>" + (t.statusNote ? '<p class="mut">Plans: ' + esc(t.statusNote) + "</p>" : "") + '<p class="mut">Feedback: ' + esc(t.feedback) + "</p></div>").join(""),
+        {limit: 5, ph: "Search company, notes or month", noun: ["touchpoint", "touchpoints"], empty: "Touchpoints you send appear here."})) +
     '</div><div class="side-c">' +
       aside("This quarter", S.data.accounts.map(a => { const q = curQ(a); return '<p style="margin-bottom:8px"><b style="font-weight:550">' + esc(a.name) + "</b><br>" + (q.st === "ok" ? bd("Q" + q.q + " touchpoint logged", "ok") : bd("Due by " + fdt(q.end) + " · " + q.left + " days left", q.left <= 21 ? "warn ring" : "ring")) + "</p>"; }).join("") || '<p class="mut">No companies yet.</p>') +
       aside("Why it matters", '<p class="mut">One documented touchpoint per quarter, plus two paid reorders a year, keeps a company in good standing and your 10% reorder rate after its first year. Two missed quarters in a row starts an account review.</p>') +
@@ -579,15 +609,19 @@ function vEarnings(){
       met("Waiting on payment", money2(wt), plural(L.waiting.length, "open invoice") + " · est.") +
       met("Paid in " + y, money2(L.paidYtd), L.paidThrough ? "paid through " + fdt(L.paidThrough) : "") +
     "</div></div>" +
-    sec("By company", '<span class="mut">' + rows.length + (rows.length === 1 ? " company" : " companies") + "</span>", '<div class="card">' + (rows.length ? '<div class="twrap"><table class="tbl rsp ec"><thead><tr><th>Company</th><th class="r">' + y + ' sales</th><th class="r">Commission</th><th class="r">Bonuses</th><th class="r">Owed now</th><th>Year-one bonuses</th></tr></thead><tbody>' +
-      rows.map(r => '<tr data-eco="' + esc(r.a.id) + '"><td><span class="b">' + esc(r.a.name) + "</span>" + (r.wait ? '<span class="two">' + money2(r.wait) + " waiting on payment</span>" : "") + '</td><td class="r num">' + money2(r.sales) + '</td><td class="r num">' + money2(r.comm) + '</td><td class="r num">' + money2(r.bon) + '</td><td class="r num' + (r.owed ? " b" : " mut") + '">' + money2(r.owed) + "</td><td>" + bonusMini(r.p) + "</td></tr>").join("") +
-      (rep.length ? '<tr class="nohov"><td><span class="b">Welcome bonus</span><span class="two">not tied to a company</span></td><td></td><td></td><td class="r num">' + money2(sum(rep)) + '</td><td class="r num mut">' + money2(sum(rep.filter(l => !l.paid))) + "</td><td></td></tr>" : "") +
-      "</tbody></table></div>" +
-      '<div class="mlist">' + rows.map(r => '<div class="mrow" data-eco="' + esc(r.a.id) + '"><div class="m"><b>' + esc(r.a.name) + '</b><span class="mut">' + money2(r.comm) + " commission · " + money2(r.bon) + " bonuses</span>" + (r.p && r.p.opening && !r.p.house ? '<span class="mut sm">Year-one bonuses: ' + ((r.p.fast.status === "earned" ? 1 : 0) + (r.p.loyal.status === "earned" ? 1 : 0) + (r.p.quality.tier ? 1 : 0)) + " of 3 earned</span>" : "") + "</div><div class=\"e\"><b class=\"num\">" + money2(r.owed) + '</b><span class="mut sm">owed</span></div></div>').join("") + "</div>"
-      : '<div class="empty">No companies yet.</div>') + "</div>") +
-    sec("Statements", "", '<div class="card">' + L.statements.map(st => '<div class="stm' + (open(st) ? " open" : "") + '"><button class="stmh" data-st="' + st.date + '"><span class="chev">' + ic("chev") + '</span><span class="m"><b>' + fd(st.date) + '</b><span class="mut sm">' + (st.status === "building" ? "invoices paid in " + MONL[+st.covers.slice(5) - 1] + " so far" : "invoices paid in " + MONL[+st.covers.slice(5) - 1]) + '</span></span><span class="r num hn2">' + (st.bonuses ? money2(st.commission) + " + " + money2(st.bonuses) + " bonus" : "") + '</span><b class="r num">' + money2(st.total) + "</b>" + stBadge(st) + "</button>" +
-      (open(st) ? '<div class="stmb">' + (payBtn(st) ? '<div class="row" style="justify-content:flex-end;padding:0 16px 8px">' + payBtn(st) + "</div>" : "") + linesTable(st.lines, rows.length > 1 || st.lines.some(l => !l.acct)) + "</div>" : "") + "</div>").join("") + "</div>") +
-    (L.waiting.length ? sec("Waiting on payment", '<span class="mut">commission once paid in full</span>', '<div class="card"><div class="twrap"><table class="tbl"><thead><tr><th>Order</th><th>Company</th><th>Placed</th><th class="r">Base</th><th class="r">Est.</th></tr></thead><tbody>' + L.waiting.slice().sort((p, q) => p.placed < q.placed ? 1 : -1).slice(0, S.wAll ? 999 : 5).map(x => '<tr data-order="' + esc(x.orderId) + '"><td class="b">' + esc(x.order) + "</td><td>" + esc(x.company) + '</td><td class="mut">' + fdt(x.placed) + '</td><td class="r num">' + money2(x.base) + '</td><td class="r num">' + money2(x.amount) + "</td></tr>").join("") + "</tbody></table></div>" + (L.waiting.length > 5 ? '<div class="row" style="justify-content:center;padding:8px"><button class="btn plain" data-wall="1">' + (S.wAll ? "Show fewer" : "Show all " + L.waiting.length) + "</button></div>" : "") + "</div>") : "") +
+    sec("By company", '<span class="mut">' + rows.length + (rows.length === 1 ? " company" : " companies") + "</span>", listCard("ec:co", rows.map(r => Object.assign(r, {s: r.a.name + " " + (r.a.externalId || "")})), xs =>
+      '<div class="twrap"><table class="tbl rsp ec"><thead><tr><th>Company</th><th class="r">' + y + ' sales</th><th class="r">Commission</th><th class="r">Bonuses</th><th class="r">Owed now</th><th>Year-one bonuses</th></tr></thead><tbody>' +
+      xs.map(r => '<tr data-eco="' + esc(r.a.id) + '"><td><span class="b">' + esc(r.a.name) + "</span>" + (r.wait ? '<span class="two">' + money2(r.wait) + " waiting on payment</span>" : "") + '</td><td class="r num">' + money2(r.sales) + '</td><td class="r num">' + money2(r.comm) + '</td><td class="r num">' + money2(r.bon) + '</td><td class="r num' + (r.owed ? " b" : " mut") + '">' + money2(r.owed) + "</td><td>" + bonusMini(r.p) + "</td></tr>").join("") + "</tbody></table></div>" +
+      '<div class="mlist">' + xs.map(r => '<div class="mrow" data-eco="' + esc(r.a.id) + '"><div class="m"><b>' + esc(r.a.name) + '</b><span class="mut">' + money2(r.comm) + " commission · " + money2(r.bon) + " bonuses</span>" + (r.p && r.p.opening && !r.p.house ? '<span class="mut sm">Year-one bonuses: ' + ((r.p.fast.status === "earned" ? 1 : 0) + (r.p.loyal.status === "earned" ? 1 : 0) + (r.p.quality.tier ? 1 : 0)) + " of 3 earned</span>" : "") + '</div><div class="e"><b class="num">' + money2(r.owed) + '</b><span class="mut sm">owed</span></div></div>').join("") + "</div>",
+      {limit: 5, ph: "Search companies", noun: ["company", "companies"], empty: "No companies yet."}) +
+      (rep.length ? '<div class="card" style="margin-top:8px"><div class="mrow nohov"><div class="m"><b>Welcome bonus</b><span class="mut">not tied to a company</span></div><div class="e"><b class="num">' + money2(sum(rep)) + '</b>' + (sum(rep.filter(l => !l.paid)) ? bd("Owed", "att") : bd("Paid", "ok")) + "</div></div></div>" : "")) +
+    sec("Statements", '<span class="mut">' + plural(L.statements.length, "statement") + "</span>", listCard("ec:st", L.statements.map(st => Object.assign(st, {s: fd(st.date) + " " + MONL[+st.covers.slice(5) - 1] + " " + st.covers.slice(0, 4) + " " + st.status + " " + st.lines.map(l => [l.order, l.company, l.label].join(" ")).join(" ")})), xs =>
+      xs.map(st => '<div class="stm' + (open(st) ? " open" : "") + '"><button class="stmh" data-st="' + st.date + '"><span class="chev">' + ic("chev") + '</span><span class="m"><b>' + fd(st.date) + '</b><span class="mut sm">' + (st.status === "building" ? "invoices paid in " + MONL[+st.covers.slice(5) - 1] + " so far" : "invoices paid in " + MONL[+st.covers.slice(5) - 1]) + '</span></span><span class="r num hn2">' + (st.bonuses ? money2(st.commission) + " + " + money2(st.bonuses) + " bonus" : "") + '</span><b class="r num">' + money2(st.total) + "</b>" + stBadge(st) + "</button>" +
+      (open(st) ? '<div class="stmb">' + (payBtn(st) ? '<div class="row" style="justify-content:flex-end;padding:0 16px 8px">' + payBtn(st) + "</div>" : "") + linesTable(st.lines, rows.length > 1 || st.lines.some(l => !l.acct)) + "</div>" : "") + "</div>").join(""),
+      {limit: 4, ph: "Search statements — month, order # or company", noun: ["statement", "statements"]})) +
+    (L.waiting.length ? sec("Waiting on payment", '<span class="mut">commission once paid in full</span>', listCard("ec:wait", L.waiting.slice().sort((p, q) => p.placed < q.placed ? 1 : -1).map(x => Object.assign(x, {s: x.order + " " + x.company + " " + fd(x.placed)})), xs =>
+      '<div class="twrap"><table class="tbl"><thead><tr><th>Order</th><th>Company</th><th>Placed</th><th class="r">Base</th><th class="r">Est.</th></tr></thead><tbody>' + xs.map(x => '<tr data-order="' + esc(x.orderId) + '"><td class="b">' + esc(x.order) + "</td><td>" + esc(x.company) + '</td><td class="mut">' + fdt(x.placed) + '</td><td class="r num">' + money2(x.base) + '</td><td class="r num">' + money2(x.amount) + "</td></tr>").join("") + "</tbody></table></div>",
+      {limit: 5, ph: "Search open invoices", noun: ["invoice", "invoices"]})) : "") +
     '<p class="mut sm" style="margin-top:4px">15% on opening orders and 10% on reorders, on the order total after discounts and refunds — shipping and tax excluded. Bonuses are paid once the qualifying invoice is paid in full.</p>' +
     "</div>";
 }
@@ -598,7 +632,9 @@ function vEarnCo(){
   return '<div class="pg">' + back("Earnings") + ph(esc(a.name), standingBadge(a), '<button class="btn out" data-acct="' + esc(a.id) + '">Company details</button>', "Opening order " + esc(p.opening) + " · " + fd(p.openingDate)) +
     '<div class="card sec"><div class="mets">' + met("Commission", money2(sum(ls.filter(l => l.type === "commission"))), "all time") + met("Bonuses", money2(sum(ls.filter(l => l.type === "bonus"))), "year one") + met("Owed now", money2(sum(ls.filter(l => !l.paid))), "earned, not yet paid") + met("Waiting on payment", money2(sum(w)), plural(w.length, "open invoice")) + "</div></div>" +
     sec("Year-one bonuses", "", '<div class="card cp">' + bonusRows(a, p) + "</div>") +
-    sec("Everything earned", '<span class="mut">newest first</span>', '<div class="card">' + (ls.length ? linesTable(ls.map(l => Object.assign({}, l, {carried: l.paid ? "" : l.carried, _st: true})), false) + '<p class="mut sm cpx">Each line goes on the statement for the month its invoice was paid. Owed lines are on your next statement.</p>' : '<div class="empty">Nothing earned yet.</div>') + "</div>") +
+    sec("Everything earned", '<span class="mut">newest first</span>', listCard("co:earn:" + a.id, ls.map(l => Object.assign({}, l, {carried: l.paid ? "" : l.carried, _st: true, s: [l.order, l.label, fd(l.date), l.paid ? "paid" : "owed", MONL[+l.statement.slice(5, 7) - 1]].join(" ")})), (xs, q) =>
+      linesTable(xs, false, q ? "Total of matches" : xs.length === ls.length ? "Total" : "Total of the latest " + xs.length) + '<p class="mut sm cpx">Each line goes on the statement for the month its invoice was paid. Owed lines are on your next statement.</p>',
+      {limit: 8, ph: "Search order #, bonus or month", noun: ["line", "lines"], empty: "Nothing earned yet."})) +
     "</div>";
 }
 async function markPaid(date){
@@ -620,7 +656,8 @@ function vNotices(){
   const p = S.data.prefs || {};
   const tg = (k, label, hint) => '<label class="ckl"><input type="checkbox" data-pref="' + k + '"' + (p[k] ? " checked" : "") + "><span>" + label + '<span class="hint">' + hint + "</span></span></label>";
   return '<div class="pg">' + ph("Notifications", "", unread() ? '<button class="btn out" data-allread="1">Mark all as read</button>' : "", "") +
-    '<div class="lay"><div>' + '<div class="card">' + (S.data.notices.length ? S.data.notices.map(noticeRow).join("") : '<div class="empty"><b>No notifications yet</b>You’ll hear about new and paid orders from your companies here and by email.</div>') + "</div>" +
+    '<div class="lay"><div>' + listCard("notices", S.data.notices.map(n => Object.assign(n, {s: [n.order, n.kind === "new" ? "new order" : n.kind === "bonus" ? "bonus" : n.kind, (acctOf(n.acct) || {}).name, ftime(n.at)].join(" ")})), xs => xs.map(noticeRow).join(""),
+      {limit: 10, ph: "Search notifications", noun: ["notification", "notifications"], empty: "<b>No notifications yet</b>You’ll hear about new and paid orders from your companies here and by email."}) +
     '</div><div class="side-c">' + aside("Email me when", '<div class="form" style="gap:8px">' + tg("newOrder", "A company places an order", "Any order under your companies, however it’s placed") + tg("paid", "An invoice is paid in full", "With your estimated commission") + tg("refund", "An order is refunded or cancelled", "Commission is adjusted to match") + tg("touchRemind", "A quarterly touchpoint is due", "Two weeks before the quarter ends") + tg("reorderRemind", "A company is due to reorder", "Based on how often they usually order") + "</div>") +
     aside("Sent to", "<p>" + esc(S.data.me.email || "your email on file") + "</p>") + "</div></div></div>";
 }
@@ -650,12 +687,16 @@ root.addEventListener("click", async e => {
   if (d.tsave){ await saveTouch(); return; }
   if (d.lrep){ S.lRep = d.lrep; S.mpConfirm = null; S.stOpen = null; render(); return; }
   if (d.eco){ go("earnco", {acct: d.eco}); return; }
-  if (d.wall){ S.wAll = !S.wAll; render(); return; }
+  if (d.more){ S.more[d.more] = !S.more[d.more]; const el = document.querySelector('[data-list="' + d.more + '"]'); if (el) el.innerHTML = listBody(d.more, S.q[d.more] || ""); return; }
   if (d.st){ const L = ledger(); if (!S.stOpen){ S.stOpen = {}; if (L) S.stOpen[L.nextStatement] = true; } S.stOpen[d.st] = !S.stOpen[d.st]; render(); return; }
   if (d.mp){ S.mpConfirm = d.mp; render(); return; }
   if (d.mpno){ S.mpConfirm = null; render(); return; }
   if (d.mpyes){ await markPaid(d.mpyes); return; }
   if (d.allread){ S.data.notices.forEach(n => n.read = true); render(); try{ await api("noticesRead", {all: true}); }catch(_){} return; }
+});
+root.addEventListener("input", e => {
+  const k = e.target.dataset && e.target.dataset.q; if (!k) return;
+  S.q[k] = e.target.value; const el = document.querySelector('[data-list="' + k + '"]'); if (el) el.innerHTML = listBody(k, e.target.value);
 });
 root.addEventListener("change", async e => {
   const t = e.target;
