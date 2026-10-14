@@ -11,7 +11,8 @@
      converting to a house account follows the review process in §6.1 and is set by Arlo Secour on the Rep Accounts tab).
    • Welcome bonus $1,000 on signing.
    Paid status: commission is paid when its invoice was paid on/before the rep's "Paid through" date (or listed on Payouts).
-   Bonuses are paid only when listed on the Payouts tab; an unpaid bonus from a past month carries to the next statement. */
+   Bonuses are paid only when listed on the Payouts tab; an unpaid bonus from a past month carries to the next statement.
+   Adjustments (Adjustments tab, added by Arlo Secour): a + or − amount with a note, on the statement for its date (or the next open one). */
 function rpLedger_(inp){
   var r2 = function(n){ return Math.round((+n || 0) * 100) / 100; };
   var P = function(s){ s = String(s).slice(0, 10).split('-'); return new Date(+s[0], +s[1] - 1, +s[2]); };
@@ -29,12 +30,15 @@ function rpLedger_(inp){
     l.amount = r2(l.amount);
     var po = paidKeys[l.key];
     l.paid = !!po || (l.type === 'commission' && !!pt && l.date <= pt);
-    l.paidOn = po ? po.paidOn : (l.paid ? stmtOf(l.date) : '');
+    l.paidOn = po ? (po.paidOn || stmtOf(l.date)) : (l.paid ? stmtOf(l.date) : '');
+    if (po){ l.method = po.method || ''; l.ref = po.ref || ''; }
     l.statement = stmtOf(l.date);
     if (!l.paid && l.statement < nextStmt){ l.carried = l.statement; l.statement = nextStmt; }
     lines.push(l);
   };
   if (rep.signed) push({type: 'bonus', key: 'WELCOME', label: 'Welcome bonus', date: rep.signed, amount: 1000});
+  (inp.adjustments || []).forEach(function(a){ if (!a || !a.date || !(+a.amount)) return;
+    push({type: 'adjustment', key: 'ADJ|' + a.id, adjId: a.id, label: 'Adjustment' + (a.note ? ': ' + a.note : ''), note: a.note || '', date: a.date, amount: +a.amount, acct: a.acct || '', company: a.company || '', by: a.by || ''}); });
 
   (inp.accts || []).forEach(function(x){
     var a = x.acct, from = x.from || '', to = x.to || '', house = String(x.standing || a.standing || '').toLowerCase() === 'house';
@@ -88,8 +92,12 @@ function rpLedger_(inp){
   var statements = Object.keys(by).sort().reverse().map(function(d){
     var ls = by[d].sort(function(p, q){ return p.type !== q.type ? (p.type === 'commission' ? -1 : 1) : p.date < q.date ? -1 : 1; });
     var tot = r2(ls.reduce(function(s, l){ return s + l.amount; }, 0)), allPaid = ls.every(function(l){ return l.paid; });
+    var pays = ls.filter(function(l){ return l.paid && l.paidOn; }).sort(function(p, q){ return p.paidOn < q.paidOn ? 1 : -1; }), pay = pays[0] || {};
     return {date: d, covers: addM(d, -1).slice(0, 7), lines: ls, total: tot, commission: r2(ls.filter(function(l){ return l.type === 'commission'; }).reduce(function(s, l){ return s + l.amount; }, 0)),
       bonuses: r2(ls.filter(function(l){ return l.type === 'bonus'; }).reduce(function(s, l){ return s + l.amount; }, 0)),
+      adjust: r2(ls.filter(function(l){ return l.type === 'adjustment'; }).reduce(function(s, l){ return s + l.amount; }, 0)),
+      paidOn: allPaid ? (pay.paidOn || '') : '', method: allPaid ? (pay.method || '') : '', ref: allPaid ? (pay.ref || '') : '',
+      due: r2(ls.filter(function(l){ return !l.paid; }).reduce(function(s, l){ return s + l.amount; }, 0)),
       status: allPaid ? 'paid' : d > today ? (addM(d, -1) <= today ? 'building' : 'upcoming') : 'due'};
   });
   var unpaidLines = lines.filter(function(l){ return !l.paid; });
@@ -103,6 +111,51 @@ function rpLedger_(inp){
     owed: r2(unpaidLines.reduce(function(s, l){ return s + l.amount; }, 0)),
     paidYtd: r2(lines.filter(function(l){ return l.paid && (l.paidOn || '').slice(0, 4) === yr; }).reduce(function(s, l){ return s + l.amount; }, 0)),
     earnedAll: r2(lines.reduce(function(s, l){ return s + l.amount; }, 0))};
+}
+
+/* ===== Printable commission statement (one rep, one statement) — a full HTML page; print it or "Save as PDF" =====
+   o = {ledger, date: 'yyyy-mm-01', rep: {name, email}, contact: 'jarrad@arlosecour.com', accounts: [{id, name}]} */
+function rpStatementHtml_(o){
+  var L = o.ledger, st = (L.statements || []).filter(function(x){ return x.date === o.date; })[0];
+  var E = function(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){ return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]; }); };
+  var M = function(n){ n = Math.round((+n || 0) * 100) / 100; return (n < 0 ? '−$' : '$') + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); };
+  var MON = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  var FD = function(s){ if (!s) return ''; var p = String(s).slice(0, 10).split('-'); return MON[+p[1] - 1].slice(0, 3) + ' ' + (+p[2]) + ', ' + p[0]; };
+  if (!st) return o.fragment ? {title: 'Statement', css: '', body: '<p>No statement for ' + E(o.date) + '.</p>'} : '<!doctype html><html><body><p>No statement for ' + E(o.date) + '.</p></body></html>';
+  var cov = st.covers.split('-'), covLabel = MON[+cov[1] - 1] + ' ' + cov[0], yr = st.date.slice(0, 4);
+  var C = st.lines.filter(function(l){ return l.type === 'commission'; }), B = st.lines.filter(function(l){ return l.type === 'bonus'; }), A = st.lines.filter(function(l){ return l.type === 'adjustment'; });
+  var row = function(l, cols){ return '<tr>' + cols.map(function(c){ return '<td' + (c[1] ? ' class="r"' : '') + '>' + c[0] + '</td>'; }).join('') + '</tr>'; };
+  var tbl = function(title, head, rows, total){ return rows.length ? '<h3>' + title + '</h3><table><thead><tr>' + head.map(function(h){ return '<th' + (h[1] ? ' class="r"' : '') + '>' + h[0] + '</th>'; }).join('') + '</tr></thead><tbody>' + rows.join('') +
+    '<tr class="tot"><td colspan="' + (head.length - 1) + '">Total ' + title.toLowerCase() + '</td><td class="r">' + M(total) + '</td></tr></tbody></table>' : ''; };
+  var sum = function(xs){ return xs.reduce(function(s, l){ return s + l.amount; }, 0); };
+  var paidYr = (L.lines || []).filter(function(l){ return l.paid && String(l.paidOn || '').slice(0, 4) === yr && l.statement <= st.date; });
+  var prog = Object.keys(L.progress || {}).map(function(id){ var p = L.progress[id], a = (o.accounts || []).filter(function(x){ return x.id === id; })[0]; return {p: p, name: a ? a.name : ''}; }).filter(function(x){ return x.p && x.p.opening && x.p.inYearOne; });
+  var status = st.status === 'paid'
+    ? '<div class="stat paid"><div><b>Paid ' + FD(st.paidOn) + '</b>' + (st.method ? ' · ' + E(st.method) : '') + (st.ref ? ' · ref ' + E(st.ref) : '') + '</div><span>' + M(st.total) + '</span></div>'
+    : '<div class="stat due"><b>' + (st.status === 'building' ? 'In progress — invoices paid in ' + covLabel + ' so far' : 'Amount due') + '</b><span>' + M(st.due) + '</span></div>';
+  var css = '@page{size:Letter;margin:.6in .65in}.rpst{font-family:Inter,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;color:#1f1f1f;font-size:10pt;line-height:1.45;background:#fff}.rpst *{box-sizing:border-box}' +
+    '.rpst .top{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1f1f1f;padding-bottom:10px;margin-bottom:14px}.rpst .brand{font-size:8.5pt;letter-spacing:.22em;font-weight:600;color:#6d6d6d}.rpst h1{font-size:19pt;margin:2px 0 0;font-weight:700;color:#1f1f1f}' +
+    '.rpst .meta{text-align:right;font-size:9.5pt}.rpst .meta b{display:block;font-size:11pt}.rpst .stat{display:flex;justify-content:space-between;align-items:center;border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:10.5pt}' +
+    '.rpst .stat span{font-size:15pt;font-weight:700}.rpst .paid{background:#eef6ef;border:1px solid #cfe5d3}.rpst .due{background:#fdf6e7;border:1px solid #f0dfb5}.rpst h3{font-size:10.5pt;margin:16px 0 4px;color:#1f1f1f}.rpst table{width:100%;border-collapse:collapse;font-size:9.5pt}' +
+    '.rpst th{text-align:left;font-weight:600;color:#555;border-bottom:1px solid #ccc;padding:5px 6px;background:none}.rpst td{padding:5px 6px;border-bottom:1px solid #eee;vertical-align:top;color:#1f1f1f}.rpst .r{text-align:right;white-space:nowrap}.rpst tr.tot td{font-weight:600;border-bottom:0;border-top:1px solid #ccc}' +
+    '.rpst .grand{display:flex;justify-content:space-between;font-size:12pt;font-weight:700;border-top:2px solid #1f1f1f;margin-top:14px;padding-top:8px}.rpst .two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.rpst .box{border:1px solid #e3e3e3;border-radius:8px;padding:10px 12px}' +
+    '.rpst .box h4{margin:0 0 6px;font-size:10pt}.rpst .box p{margin:2px 0;display:flex;justify-content:space-between}.rpst .mut{color:#6d6d6d}.rpst .foot{margin-top:18px;font-size:8.5pt;color:#6d6d6d;border-top:1px solid #eee;padding-top:8px}.rpst .sm{font-size:8.5pt}';
+  var body = '<div class="rpst">' +
+
+    '<div class="top"><div><div class="brand">ARLO SECOUR · WHOLESALE</div><h1>Commission statement</h1><div class="mut">' + E(o.rep.name) + (o.rep.email ? ' · ' + E(o.rep.email) : '') + '</div></div>' +
+    '<div class="meta"><b>' + FD(st.date) + '</b>Invoices paid in ' + covLabel + '</div></div>' + status +
+    tbl('Commission', [['Order'], ['Company'], ['Placed'], ['Invoice paid'], ['Base', 1], ['Rate', 1], ['Amount', 1]], C.map(function(l){ return row(l, [[E(l.order) + '<div class="sm mut">' + E(l.label) + (l.carried ? ' · carried from ' + FD(l.carried) : '') + '</div>'], [E(l.company)], [FD(l.placed)], [FD(l.date)], [M(l.base), 1], [Math.round(l.rate * 100) + '%', 1], [M(l.amount), 1]]); }), sum(C)) +
+    tbl('Bonuses', [['Bonus'], ['Company'], ['Earned'], ['Amount', 1]], B.map(function(l){ return row(l, [[E(l.label) + (l.order ? '<div class="sm mut">when ' + E(l.order) + ' was paid in full' + (l.carried ? ' · carried from ' + FD(l.carried) : '') + '</div>' : '')], [E(l.company || '—')], [FD(l.date)], [M(l.amount), 1]]); }), sum(B)) +
+    tbl('Adjustments', [['Note'], ['Company'], ['Date'], ['Amount', 1]], A.map(function(l){ return row(l, [[E(l.note || 'Adjustment')], [E(l.company || '—')], [FD(l.date)], [M(l.amount), 1]]); }), sum(A)) +
+    '<div class="grand"><span>Statement total</span><span>' + M(st.total) + '</span></div>' +
+    '<div class="two"><div class="box"><h4>' + yr + ' to date</h4><p><span>Commission paid</span><b>' + M(sum(paidYr.filter(function(l){ return l.type === 'commission'; }))) + '</b></p><p><span>Bonuses paid</span><b>' + M(sum(paidYr.filter(function(l){ return l.type === 'bonus'; }))) + '</b></p>' +
+      (paidYr.some(function(l){ return l.type === 'adjustment'; }) ? '<p><span>Adjustments</span><b>' + M(sum(paidYr.filter(function(l){ return l.type === 'adjustment'; }))) + '</b></p>' : '') + '<p style="border-top:1px solid #eee;padding-top:4px"><span>Total paid</span><b>' + M(sum(paidYr)) + '</b></p></div>' +
+    '<div class="box"><h4>Year-one bonus progress</h4>' + (prog.length ? prog.map(function(x){ var p = x.p; return '<p><span>' + E(x.name) + '</span><span class="mut">ends ' + FD(p.yearEnd) + '</span></p><p class="sm mut"><span>Fast Reorder ' + (p.fast.status === 'earned' ? '✓' : p.fast.status) + ' · Loyal ' + (p.loyal.status === 'earned' ? '✓' : Math.min(p.loyal.orders, 4) + '/4') + ' · Quality ' + (p.quality.tier ? p.quality.tier.split(' — ')[0] + ' ✓' : M(p.quality.reorders) + ' of $5,000') + '</span></p>'; }).join('') : '<p class="mut">No accounts in their first year.</p>') + '</div></div>' +
+    '<div class="foot">Commission: 15% on an opening order, 10% on reorders, on the order total after discounts and refunds (shipping and tax excluded), for invoices paid in full. Bonuses are paid once the qualifying invoice is paid in full. Questions? ' + E(o.contact || 'Arlo Secour') + '</div>' +
+    '</div>';
+  var title = E(o.rep.name) + ' — Commission statement ' + FD(st.date);
+  if (o.fragment) return {title: title, css: css, body: body};
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>' + title + '</title><style>body{margin:0}' + css + '</style></head><body>' + body + '</body></html>';
 }
 
 /* ===== Arlo Secour · Wholesale portal — runs inside the Shopify admin (embedded app) =====
@@ -659,7 +712,11 @@ function vEarnings(){
   const rows = accts.map(a => { const ls = L.lines.filter(l => l.acct === a.id), w = L.waiting.filter(x => x.acct === a.id);
     return {a, p: L.progress[a.id], comm: sum(ls.filter(l => l.type === "commission")), bon: sum(ls.filter(l => l.type === "bonus")), owed: sum(ls.filter(l => !l.paid)), wait: sum(w), sales: sum(a.orders.filter(o => !o.cancelled && o.placed.slice(0, 4) === y), orderNet)}; })
     .sort((p, q) => q.owed - p.owed || q.comm + q.bon - p.comm - p.bon);
-  const payBtn = st => !admin || st.status === "paid" ? "" : S.mpConfirm === st.date ? '<span class="row" style="gap:6px"><button class="btn" data-mpno="1">Cancel</button><button class="btn pri" data-mpyes="' + st.date + '"' + (S.busy ? " disabled" : "") + ">" + (S.busy ? "Saving…" : "Confirm: paid " + money2(st.total)) + "</button></span>" : st.status !== "due" ? "" : '<button class="btn out" data-mp="' + st.date + '">Mark paid</button>';
+  const payBtn = st => !admin || st.status === "paid" ? "" : S.mpConfirm === st.date
+    ? '<div class="payf"><label class="fld"><span>Paid on</span><input type="date" id="mpDate" max="' + TODAY + '" value="' + TODAY + '"></label><label class="fld"><span>Method</span><select id="mpMethod">' + PAY_METHODS.map(m => "<option>" + m + "</option>").join("") + '</select></label><label class="fld"><span>Reference <i>(optional)</i></span><input id="mpRef" maxlength="60" placeholder="e.g. check 1042"></label>' +
+      '<div class="row"><button class="btn" data-mpno="1">Cancel</button><button class="btn pri" data-mpyes="' + st.date + '" data-amt="' + st.due + '"' + (S.busy ? " disabled" : "") + ">" + (S.busy ? "Saving…" : "Record payment of " + money2(st.due)) + "</button></div></div>"
+    : st.status !== "due" ? "" : '<button class="btn out" data-mp="' + st.date + '">Mark paid</button>';
+  const prBtn = st => '<button class="btn plain" data-print="' + st.date + '">' + ic("receipt") + "Print statement</button>";
   const open = st => S.stOpen ? S.stOpen[st.date] : st.date === L.nextStatement;
   return '<div class="pg">' + ph("Earnings" + (who ? " · " + esc(who.name) : ""), "", repPick, "Paid on the 1st for invoices paid in full the month before.") +
     '<div class="card sec"><div class="mets">' +
@@ -676,7 +733,7 @@ function vEarnings(){
       (rep.length ? '<div class="card" style="margin-top:8px"><div class="mrow nohov"><div class="m"><b>Welcome bonus</b><span class="mut">not tied to a company</span></div><div class="e"><b class="num">' + money2(sum(rep)) + '</b>' + (sum(rep.filter(l => !l.paid)) ? bd("Owed", "att") : bd("Paid", "ok")) + "</div></div></div>" : "")) +
     sec("Statements", '<span class="mut">' + plural(L.statements.length, "statement") + "</span>", listCard("ec:st", L.statements.map(st => Object.assign(st, {s: fd(st.date) + " " + MONL[+st.covers.slice(5) - 1] + " " + st.covers.slice(0, 4) + " " + st.status + " " + st.lines.map(l => [l.order, l.company, l.label].join(" ")).join(" ")})), xs =>
       xs.map(st => '<div class="stm' + (open(st) ? " open" : "") + '"><button class="stmh" data-st="' + st.date + '"><span class="chev">' + ic("chev") + '</span><span class="m"><b>' + fd(st.date) + '</b><span class="mut sm">' + (st.status === "building" ? "invoices paid in " + MONL[+st.covers.slice(5) - 1] + " so far" : "invoices paid in " + MONL[+st.covers.slice(5) - 1]) + '</span></span><span class="r num hn2">' + (st.bonuses ? money2(st.commission) + " + " + money2(st.bonuses) + " bonus" : "") + '</span><b class="r num">' + money2(st.total) + "</b>" + stBadge(st) + "</button>" +
-      (open(st) ? '<div class="stmb">' + (payBtn(st) ? '<div class="row" style="justify-content:flex-end;padding:0 16px 8px">' + payBtn(st) + "</div>" : "") + linesTable(st.lines, rows.length > 1 || st.lines.some(l => !l.acct)) + "</div>" : "") + "</div>").join(""),
+      (open(st) ? '<div class="stmb"><div class="stmact"><span class="mut sm">' + (st.status === "paid" ? "Paid " + fd(st.paidOn) + (st.method ? " · " + esc(st.method) : "") + (st.ref ? " · ref " + esc(st.ref) : "") : st.status === "building" ? "Still adding invoices paid this month" : "Due " + money2(st.due)) + '</span><span class="row">' + prBtn(st) + (S.mpConfirm === st.date ? "" : payBtn(st)) + "</span></div>" + (S.mpConfirm === st.date ? payBtn(st) : "") + linesTable(st.lines, rows.length > 1 || st.lines.some(l => !l.acct)) + "</div>" : "") + "</div>").join(""),
       {limit: 4, ph: "Search statements — month, order # or company", noun: ["statement", "statements"]})) +
     (L.waiting.length ? sec("Waiting on payment", '<span class="mut">commission once paid in full</span>', listCard("ec:wait", L.waiting.slice().sort((p, q) => p.placed < q.placed ? 1 : -1).map(x => Object.assign(x, {s: x.order + " " + x.company + " " + fd(x.placed)})), xs =>
       '<div class="twrap"><table class="tbl"><thead><tr><th>Order</th><th>Company</th><th>Placed</th><th class="r">Base</th><th class="r">Est.</th></tr></thead><tbody>' + xs.map(x => '<tr data-order="' + esc(x.orderId) + '"><td class="b">' + esc(x.order) + "</td><td>" + esc(x.company) + '</td><td class="mut">' + fdt(x.placed) + '</td><td class="r num">' + money2(x.base) + '</td><td class="r num">' + money2(x.amount) + "</td></tr>").join("") + "</tbody></table></div>",
@@ -696,10 +753,23 @@ function vEarnCo(){
       {limit: 8, ph: "Search order #, bonus or month", noun: ["line", "lines"], empty: "Nothing earned yet."})) +
     "</div>";
 }
-async function markPaid(date){
+/* print a statement: built here from the same ledger the server uses, then printed from a hidden frame (Print → Save as PDF) */
+function printStatement(date){
+  const L = ledger(), d = S.data; if (!L) return;
+  const who = d.me.role === "admin" && d.reps ? (d.reps.find(r => r.staffId === (S.lRep || d.reps[0].staffId)) || d.reps[0]) : {name: d.me.name, email: d.me.email};
+  printHtml(rpStatementHtml_({ledger: L, date, rep: {name: who.name, email: who.email || ""}, contact: "Arlo Secour", accounts: d.accounts.map(a => ({id: a.id, name: a.name}))}));
+}
+function printHtml(html){
+  const f = document.createElement("iframe"); f.setAttribute("aria-hidden", "true"); f.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
+  document.body.appendChild(f); const w = f.contentWindow; w.document.open(); w.document.write(html); w.document.close();
+  setTimeout(() => { try{ w.focus(); w.print(); }catch(e){ toast("Couldn’t open printing: " + e.message); } setTimeout(() => f.remove(), 60000); }, 300);
+}
+const PAY_METHODS = ["ACH", "Check", "Zelle", "PayPal", "Venmo", "Cash", "Other"];
+async function markPaid(date, amt){
   const L = ledger(), d = S.data, id = S.lRep || (d.reps && d.reps[0] && d.reps[0].staffId);
+  const v = k => ($(k) || {}).value || "", body = {staffId: id, statement: date, paidOn: v("mpDate") || TODAY, method: v("mpMethod"), ref: v("mpRef").trim(), expect: +amt};
   S.busy = true; render();
-  try{ await api("markPaid", {staffId: id, statement: date, paidOn: TODAY}); S.mpConfirm = null; S.busy = false; toast("Statement marked paid"); await load(); go("earnings", {isBack: true}); return; }
+  try{ await api("markPaid", body); S.mpConfirm = null; S.busy = false; toast("Payment recorded"); await load(); go("earnings", {isBack: true}); return; }
   catch(e){ toast("Couldn’t save: " + e.message); }
   S.busy = false; render();
 }
@@ -752,7 +822,8 @@ root.addEventListener("click", async e => {
   if (d.st){ const L = ledger(); if (!S.stOpen){ S.stOpen = {}; if (L) S.stOpen[L.nextStatement] = true; } S.stOpen[d.st] = !S.stOpen[d.st]; render(); return; }
   if (d.mp){ S.mpConfirm = d.mp; render(); return; }
   if (d.mpno){ S.mpConfirm = null; render(); return; }
-  if (d.mpyes){ await markPaid(d.mpyes); return; }
+  if (d.mpyes){ await markPaid(d.mpyes, d.amt); return; }
+  if (d.print){ printStatement(d.print); return; }
   if (d.allread){ S.data.notices.forEach(n => n.read = true); render(); try{ await api("noticesRead", {all: true}); }catch(_){} return; }
 });
 root.addEventListener("input", e => {

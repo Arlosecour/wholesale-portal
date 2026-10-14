@@ -448,3 +448,10 @@ a.btn:hover{text-decoration:none}
 .fld.inl input{height:30px}
 .bars.dense small{font-size:9px}
 .fld.inl{flex-direction:row}
+/* statement actions + record payment */
+.stmact{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:0 16px 8px}
+.stmact .btn svg{width:15px;height:15px;margin-right:4px;vertical-align:-3px}
+.payf{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;gap:10px;align-items:end;margin:0 16px 12px;padding:12px;border:1px solid #e3e3e3;border-radius:10px;background:#fafafa}
+.payf .fld{margin:0}
+.payf .row{justify-content:flex-end;flex-wrap:nowrap}
+@container pn (max-width: 620px){ .payf{grid-template-columns:1fr} .payf .row{justify-content:stretch} }
