@@ -255,7 +255,8 @@ const estRate = (o, a) => isOpening(o, a) ? 0.15 : 0.10;
 function ledger(){ const d = S.data; if (d.ledger) return d.ledger; if (d.ledgers && d.reps && d.reps.length){ const id = S.lRep && d.ledgers[S.lRep] ? S.lRep : d.reps[0].staffId; return d.ledgers[id] || null; } return null; }
 const lineOf = id => { const L = ledger(); return L ? L.lines.find(l => l.key === "C|" + id) : null; };
 const nextSt = L => L ? L.statements.find(x => x.date === L.nextStatement) : null;
-const stBadge = st => st.status === "paid" ? bd("Paid", "ok") : st.status === "building" ? bd("In progress", "info") : st.status === "due" ? bd("Due", "warn") : bd("Upcoming", "nodot");
+const stPaidOn = st => st.lines.map(l => l.paidOn || "").sort().pop() || "";
+const stBadge = st => st.status === "paid" ? bd(stPaidOn(st) ? "Paid " + fdt(stPaidOn(st)) : "Paid", "ok") : st.status === "building" ? bd("In progress", "info") : st.status === "due" ? bd("Due", "warn") : bd("Upcoming", "nodot");
 
 /* ---------- badges + layout helpers ---------- */
 const bd = (t, c) => '<span class="bd ' + (c || "") + '">' + t + "</span>";
