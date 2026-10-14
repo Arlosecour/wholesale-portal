@@ -440,3 +440,11 @@ a.btn:hover{text-decoration:none}
 .tabs+.lsearch{border-top:0}
 .lfoot{display:flex;justify-content:center;padding:8px;border-top:1px solid #ebebeb}
 .lfoot.mut{justify-content:flex-start;padding:8px 16px}
+/* reports */
+.rctl{display:flex;flex-direction:column;gap:10px}
+.rctl .segm{flex-wrap:wrap}
+.fld.inl{display:flex;align-items:center;gap:6px;margin:0}
+.fld.inl span{font-weight:500}
+.fld.inl input{height:30px}
+.bars.dense small{font-size:9px}
+.fld.inl{flex-direction:row}

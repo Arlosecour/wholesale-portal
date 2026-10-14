@@ -167,7 +167,7 @@ const ic = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stro
 
 /* ---------- state ---------- */
 const S = {data: null, err: "", view: "home", hist: [], acct: null, locId: null, custId: null, okey: null, oFilter: "all", tForm: null, tErr: {}, sMode: "placed", sYear: null, busy: false, lRep: null, mpConfirm: null, stOpen: null, q: {}, more: {}};
-const NAV = [["home", "Home"], ["companies", "Companies"], ["customers", "Customers"], ["orders", "Orders"], ["touch", "Touchpoints"], ["sales", "Sales"], ["earnings", "Earnings"]];
+const NAV = [["home", "Home"], ["companies", "Companies"], ["customers", "Customers"], ["orders", "Orders"], ["touch", "Touchpoints"], ["sales", "Reports"], ["earnings", "Earnings"]];
 
 /* ---------- server ---------- */
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -533,23 +533,81 @@ async function saveTouch(){
   S.busy = false; render();
 }
 
-/* ---------- sales ---------- */
+/* ---------- reports: any period, by company / month / product, with commission; CSV download ---------- */
+const PERIODS = [["tm", "This month"], ["lm", "Last month"], ["tq", "This quarter"], ["lq", "Last quarter"], ["ty", "This year"], ["ly", "Last year"], ["custom", "Custom"]];
+function periodRange(k){
+  const t = D(TODAY), y = t.getFullYear(), m = t.getMonth(), q = Math.floor(m / 3);
+  const r = (a, b) => [iso(a), iso(b)];
+  if (k === "tm") return r(new Date(y, m, 1), new Date(y, m + 1, 0));
+  if (k === "lm") return r(new Date(y, m - 1, 1), new Date(y, m, 0));
+  if (k === "tq") return r(new Date(y, q * 3, 1), new Date(y, q * 3 + 3, 0));
+  if (k === "lq") return r(new Date(y, q * 3 - 3, 1), new Date(y, q * 3, 0));
+  if (k === "ly") return r(new Date(y - 1, 0, 1), new Date(y - 1, 11, 31));
+  if (k === "custom") return [S.rFrom || iso(new Date(y, 0, 1)), S.rTo || TODAY];
+  return r(new Date(y, 0, 1), new Date(y, 11, 31));
+}
+function allLines(){ const d = S.data; if (d.ledger) return d.ledger.lines; const out = []; Object.keys(d.ledgers || {}).forEach(k => (d.ledgers[k] && d.ledgers[k].lines || []).forEach(l => out.push(l))); return out; }
+function reportData(){
+  const [from, to] = periodRange(S.rP || "ty"), by = S.rBy || "placed", lines = allLines();
+  const comm = {}; lines.forEach(l => { if (l.type === "commission") comm[l.orderId] = (comm[l.orderId] || 0) + l.amount; });
+  const dOf = x => by === "paid" ? x.o.paid : x.o.placed;
+  const xs = allOrders().filter(x => !x.o.cancelled && dOf(x) && dOf(x) >= from && dOf(x) <= to).map(x => Object.assign(x, {d: dOf(x), comm: comm[x.o.id] || 0}));
+  const bonus = lines.filter(l => l.type === "bonus" && l.date >= from && l.date <= to);
+  const commP = lines.filter(l => l.type === "commission" && l.date >= from && l.date <= to);
+  return {from, to, by, xs, bonus, commP};
+}
+function csvDownload(name, rows){
+  const csv = rows.map(r => r.map(v => { v = v == null ? "" : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(",")).join("\r\n");
+  try{
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["﻿" + csv], {type: "text/csv"})); a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); toast("Downloading " + name);
+  }catch(e){ toast("Couldn’t download: " + e.message); }
+}
+function reportCsv(kind){
+  const R = reportData(), tag = R.from + "_to_" + R.to;
+  if (kind === "orders") csvDownload("orders_" + tag + ".csv", [["Order", "Company", "Customer", "PO", "Placed", "Paid", "Subtotal", "Refunded", "Net sales", "Commission", "Status"]].concat(
+    R.xs.slice().sort((a, b) => a.d < b.d ? -1 : 1).map(x => { const h = x.o.customer && contactOf(x.o.customer); return [x.o.name, x.acct.name, h ? cName(h.c) : "", x.o.po || "", x.o.placed, x.o.paid || "", (+x.o.subtotal).toFixed(2), (+x.o.refunded || 0).toFixed(2), x.total.toFixed(2), x.comm.toFixed(2), x.o.paid ? "Paid" : "Payment pending"]; })));
+  else csvDownload("summary_by_" + (S.rG || "company") + "_" + tag + ".csv", [groupHead()].concat(groupRows(R).map(g => g.csv)));
+}
+const groupHead = () => (S.rG || "company") === "product" ? ["Product type", "Units", "Sales"] : [(S.rG || "company") === "month" ? "Month" : "Company", "Orders", "Sales", "Commission", "Last order"];
+function groupRows(R){
+  const g = S.rG || "company", m = {};
+  if (g === "product"){
+    R.xs.forEach(x => x.o.lines.forEach(l => { const k = l.kind || "Other", e = m[k] = m[k] || {k, units: 0, sales: 0}; e.units += l.qty; e.sales += l.qty * l.price; }));
+    return Object.values(m).sort((a, b) => b.sales - a.sales).map(e => Object.assign(e, {s: e.k, csv: [e.k, e.units, e.sales.toFixed(2)]}));
+  }
+  R.xs.forEach(x => { const k = g === "month" ? x.d.slice(0, 7) : x.acct.id, e = m[k] = m[k] || {k, label: g === "month" ? MONL[+k.slice(5) - 1] + " " + k.slice(0, 4) : x.acct.name, acct: g === "month" ? null : x.acct.id, n: 0, sales: 0, comm: 0, last: ""};
+    e.n++; e.sales += x.total; e.comm += x.comm; if (x.d > e.last) e.last = x.d; });
+  const out = Object.values(m).sort((a, b) => g === "month" ? (a.k < b.k ? 1 : -1) : b.sales - a.sales);
+  return out.map(e => Object.assign(e, {s: e.label, csv: [e.label, e.n, e.sales.toFixed(2), e.comm.toFixed(2), e.last]}));
+}
 function vSales(){
-  const shop = allOrders().filter(x => !x.o.cancelled);
-  const years = [...new Set(shop.map(x => x.o.placed.slice(0, 4)).concat([TODAY.slice(0, 4)]))].sort().reverse();
-  const y = S.sYear || years[0], dateOf = x => S.sMode === "paid" ? x.o.paid : x.o.placed;
-  const inY = shop.filter(x => dateOf(x) && dateOf(x).slice(0, 4) === y);
-  const by = Array(12).fill(0); inY.forEach(x => { by[+dateOf(x).slice(5, 7) - 1] += x.total; });
-  const max = Math.max(1, ...by), curM = TODAY.slice(0, 4) === y ? +TODAY.slice(5, 7) - 1 : -1, tot = by.reduce((s, v) => s + v, 0);
-  const lineT = {}; inY.forEach(x => x.o.lines.forEach(l => { const k = l.kind || "Other"; lineT[k] = (lineT[k] || 0) + l.qty * l.price; }));
-  const lk = Object.keys(lineT).sort((a, b) => lineT[b] - lineT[a]), lmax = Math.max(1, ...lk.map(k => lineT[k]));
-  const best = by.some(v => v) ? by.indexOf(Math.max(...by)) : -1;
-  return '<div class="pg wide">' + ph("Sales", "", '<div class="segm">' + years.map(v => '<button data-sy="' + v + '" class="' + (v === y ? "on" : "") + '">' + v + "</button>").join("") + '</div><div class="segm"><button data-sm="placed" class="' + (S.sMode === "placed" ? "on" : "") + '">By order date</button><button data-sm="paid" class="' + (S.sMode === "paid" ? "on" : "") + '">By paid date</button></div>', "") +
-    '<div class="card sec"><div class="mets">' + met("Total sales", money2(tot), plural(inY.length, "order") + " in " + y) + met("Average order", money2(inY.length ? tot / inY.length : 0), "after discounts, before shipping &amp; tax") + met("Best month", best >= 0 ? MONL[best] : "—", best >= 0 ? money2(by[best]) : "") + met("Companies ordering", new Set(inY.map(x => x.acct.id)).size, "of " + S.data.accounts.length) + "</div></div>" +
-    sec("Sales over time", '<span class="mut">' + (S.sMode === "paid" ? "by the month each invoice was paid" : "by the month each order was placed") + "</span>", '<div class="card"><div class="bars">' + by.map((v, i) => '<div class="bar' + (v ? "" : " zero") + (i === curM ? " now" : "") + '" title="' + MONL[i] + ": " + money2(v) + '"><em>' + (v ? money(v) : "") + '</em><i style="height:' + (v ? Math.max(3, Math.round(v / max * 130)) : 1) + 'px"></i><small>' + MON[i] + "</small></div>").join("") + "</div></div>") +
-    '<div class="lay"><div>' +
-      sec("Sales by company", "", '<div class="card"><table class="tbl"><thead><tr><th>Company</th><th class="r">Orders</th><th>Last order</th><th class="r">Total sales</th></tr></thead><tbody>' + S.data.accounts.map(a => { const xs = inY.filter(x => x.acct === a); return '<tr data-acct="' + esc(a.id) + '"><td class="b">' + esc(a.name) + '</td><td class="r num">' + xs.length + '</td><td class="mut">' + (xs.length ? fdt(xs[0].o.placed) : "—") + '</td><td class="r num">' + money2(xs.reduce((s, x) => s + x.total, 0)) + "</td></tr>"; }).join("") + "</tbody></table></div>") +
-    '</div><div class="side-c">' + aside("Sales by product type", lk.length ? lk.map(k => '<div style="margin-bottom:8px"><div class="row" style="justify-content:space-between"><span>' + esc(k) + '</span><b class="num">' + money(lineT[k]) + '</b></div><div class="meter"><i style="width:' + Math.round(lineT[k] / lmax * 100) + '%"></i></div></div>').join("") : '<p class="mut">No sales in ' + y + " yet.</p>") + "</div></div></div>";
+  const R = reportData(), tot = R.xs.reduce((s, x) => s + x.total, 0), g = S.rG || "company";
+  const months = []; { let d = D(R.from.slice(0, 7) + "-01"); const end = R.to.slice(0, 7); while (iso(d).slice(0, 7) <= end && months.length < 36){ months.push(iso(d).slice(0, 7)); d = new Date(d.getFullYear(), d.getMonth() + 1, 1); } }
+  const byM = {}; R.xs.forEach(x => { const k = x.d.slice(0, 7); byM[k] = (byM[k] || 0) + x.total; });
+  const max = Math.max(1, ...months.map(k => byM[k] || 0)), curM = TODAY.slice(0, 7);
+  const lineT = {}; R.xs.forEach(x => x.o.lines.forEach(l => { const k = l.kind || "Other"; lineT[k] = (lineT[k] || 0) + l.qty * l.price; }));
+  const commSum = R.commP.reduce((s, l) => s + l.amount, 0), bonSum = R.bonus.reduce((s, l) => s + l.amount, 0);
+  const rows = groupRows(R);
+  const periodLabel = fd(R.from) + " – " + fd(R.to);
+  return '<div class="pg wide">' + ph("Reports", "", '<button class="btn out" data-csv="summary">Download summary</button><button class="btn pri" data-csv="orders">Download orders</button>', "Sales and commission for any period — including orders older than Shopify’s 60 days, kept in the portal’s order history.") +
+    '<div class="card sec cp rctl">' +
+      '<div class="segm">' + PERIODS.map(p => '<button data-rp="' + p[0] + '" class="' + ((S.rP || "ty") === p[0] ? "on" : "") + '">' + p[1] + "</button>").join("") + "</div>" +
+      ((S.rP || "ty") === "custom" ? '<div class="row"><label class="fld inl"><span>From</span><input type="date" id="rFrom" value="' + esc(R.from) + '"></label><label class="fld inl"><span>To</span><input type="date" id="rTo" value="' + esc(R.to) + '"></label></div>' : "") +
+      '<div class="row" style="justify-content:space-between"><span class="mut">' + periodLabel + '</span><div class="segm"><button data-rb="placed" class="' + (R.by === "placed" ? "on" : "") + '">By order date</button><button data-rb="paid" class="' + (R.by === "paid" ? "on" : "") + '">By paid date</button></div></div>' +
+    "</div>" +
+    '<div class="card sec"><div class="mets">' + met("Sales", money2(tot), plural(R.xs.length, "order")) + met("Average order", money2(R.xs.length ? tot / R.xs.length : 0), "after discounts, before shipping &amp; tax") +
+      met("Commission", money2(commSum), "on invoices paid in this period") + met("Bonuses", money2(bonSum), R.bonus.length + (R.bonus.length === 1 ? " bonus" : " bonuses") + " earned") + "</div></div>" +
+    (months.length > 1 ? sec("Sales by month", '<span class="mut">' + (R.by === "paid" ? "by the month each invoice was paid" : "by the month each order was placed") + "</span>", '<div class="card"><div class="bars' + (months.length > 12 ? " dense" : "") + '" style="grid-template-columns:repeat(' + Math.max(months.length, 6) + ',minmax(0,1fr))">' + months.map(k => { const v = byM[k] || 0, i = +k.slice(5) - 1; return '<div class="bar' + (v ? "" : " zero") + (k === curM ? " now" : "") + '" title="' + MONL[i] + " " + k.slice(0, 4) + ": " + money2(v) + '"><em>' + (v ? money(v) : "") + '</em><i style="height:' + (v ? Math.max(3, Math.round(v / max * 130)) : 1) + 'px"></i><small>' + MON[i] + (months.length > 12 || k.slice(0, 4) !== TODAY.slice(0, 4) ? " " + k.slice(2, 4) : "") + "</small></div>"; }).join("") + "</div></div>") : "") +
+    sec("Summary", '<div class="segm"><button data-rg="company" class="' + (g === "company" ? "on" : "") + '">By company</button><button data-rg="month" class="' + (g === "month" ? "on" : "") + '">By month</button><button data-rg="product" class="' + (g === "product" ? "on" : "") + '">By product</button></div>',
+      listCard("rep:" + g, rows, xs => g === "product"
+        ? '<table class="tbl"><thead><tr><th>Product type</th><th class="r">Units</th><th class="r">Sales</th></tr></thead><tbody>' + xs.map(e => "<tr><td class=\"b\">" + esc(e.k) + '</td><td class="r num">' + e.units + '</td><td class="r num">' + money2(e.sales) + "</td></tr>").join("") + "</tbody></table>"
+        : '<div class="twrap"><table class="tbl"><thead><tr><th>' + (g === "month" ? "Month" : "Company") + '</th><th class="r">Orders</th><th class="r">Sales</th><th class="r">Commission</th><th class="hn">Last order</th></tr></thead><tbody>' + xs.map(e => "<tr" + (e.acct ? ' data-acct="' + esc(e.acct) + '"' : "") + '><td class="b">' + esc(e.label) + '</td><td class="r num">' + e.n + '</td><td class="r num">' + money2(e.sales) + '</td><td class="r num">' + money2(e.comm) + '</td><td class="mut hn">' + fdt(e.last) + "</td></tr>").join("") +
+          '<tr class="nohov"><td class="b">Total</td><td class="r num b">' + xs.reduce((s, e) => s + e.n, 0) + '</td><td class="r num b">' + money2(xs.reduce((s, e) => s + e.sales, 0)) + '</td><td class="r num b">' + money2(xs.reduce((s, e) => s + e.comm, 0)) + '</td><td class="hn"></td></tr></tbody></table></div>',
+        {limit: g === "month" ? 12 : 10, ph: g === "product" ? "Search product types" : g === "month" ? "Search months" : "Search companies", noun: g === "product" ? ["product type", "product types"] : g === "month" ? ["month", "months"] : ["company", "companies"], empty: "No sales in this period."})) +
+    sec("Orders in this period", '<span class="mut">' + plural(R.xs.length, "order") + "</span>", listCard("rep:orders", R.xs.slice().sort((a, b) => a.d < b.d ? 1 : -1).map(x => Object.assign(x, {s: [x.o.name, x.o.po, x.acct.name, fd(x.d), MONL[+x.d.slice(5, 7) - 1], x.o.customer && contactOf(x.o.customer) ? cName(contactOf(x.o.customer).c) : ""].join(" ")})), xs => ordersTable(xs),
+      {limit: 10, ph: "Search order #, PO, company, customer or month", noun: ["order", "orders"], empty: "No orders in this period."})) +
+    "</div>";
 }
 
 /* ---------- earnings: statements, bonuses, what's waiting ---------- */
@@ -681,8 +739,10 @@ root.addEventListener("click", async e => {
   if (d.loc){ go("location", {locId: d.loc}); return; }
   if (d.tp){ go("touch", {acctForTouch: d.tp}); return; }
   if (d.of){ S.oFilter = d.of; render(); return; }
-  if (d.sy){ S.sYear = d.sy; render(); return; }
-  if (d.sm){ S.sMode = d.sm; render(); return; }
+  if (d.rp){ S.rP = d.rp; render(); return; }
+  if (d.rb){ S.rBy = d.rb; render(); return; }
+  if (d.rg){ S.rG = d.rg; render(); return; }
+  if (d.csv){ reportCsv(d.csv); return; }
   if (d.tk){ readTouch(); S.tForm.kind = d.tk; render(); return; }
   if (d.tsave){ await saveTouch(); return; }
   if (d.lrep){ S.lRep = d.lrep; S.mpConfirm = null; S.stOpen = null; render(); return; }
@@ -700,6 +760,7 @@ root.addEventListener("input", e => {
 });
 root.addEventListener("change", async e => {
   const t = e.target;
+  if (t.id === "rFrom" || t.id === "rTo"){ S[t.id] = t.value; if (S.rFrom && S.rTo && S.rFrom > S.rTo){ const x = S.rFrom; S.rFrom = S.rTo; S.rTo = x; } render(); return; }
   if (t.dataset.pref){ S.data.prefs[t.dataset.pref] = t.checked; try{ await api("prefs", {prefs: S.data.prefs}); toast("Saved"); }catch(err){ toast("Couldn’t save: " + err.message); } }
 });
 
